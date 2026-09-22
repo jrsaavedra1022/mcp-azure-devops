@@ -196,7 +196,7 @@ test("official MCP client lists/calls tools and rejects invalid input", async ()
   await client.connect(b);
   try {
     const list = await client.listTools();
-    assert.equal(list.tools.length, 7);
+    assert.equal(list.tools.length, 10);
     assert.ok(list.tools.every((t) => t.annotations?.readOnlyHint === true));
     const result = await client.callTool({
       name: "ado_get_release_variables",
@@ -227,7 +227,7 @@ test("stdio process initializes without leaking credentials to protocol output",
   const client = new Client({ name: "stdio-test", version: "1.0.0" });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 7);
+    assert.equal((await client.listTools()).tools.length, 10);
     const result = await client.callTool({
       name: "ado_list_configured_organizations",
       arguments: {},

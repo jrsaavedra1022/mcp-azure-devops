@@ -1,6 +1,6 @@
 # Operaciones recurrentes (0.2, preview)
 
-El servidor conserva sus siete tools de lectura. Con `AZDO_OPERATIONS_FILE` habilita seis tools adicionales de catálogo, planificación, historial y panel. Solo la interfaz local puede aplicar planes: no existe una tool MCP que escriba directamente o apruebe un plan. Esta separación evita llamadas accidentales desde el modelo; no constituye aislamiento frente a software malicioso con acceso al mismo usuario y al enlace de sesión.
+El servidor ofrece diez tools de lectura, incluidas las siete originales. Con `AZDO_OPERATIONS_FILE` habilita seis tools adicionales de catálogo, planificación, historial y panel. Solo la interfaz local puede aplicar planes: no existe una tool MCP que escriba directamente o apruebe un plan. Esta separación evita llamadas accidentales desde el modelo; no constituye aislamiento frente a software malicioso con acceso al mismo usuario y al enlace de sesión.
 
 ## Probar sin Azure
 
@@ -89,7 +89,7 @@ La verificación de la huella es conservadora: si Azure normaliza otros campos i
 
 ## Redeploy y efectos posteriores
 
-Esta versión solo implementa `environmentRedeploy` para stages de Classic Releases. No ejecuta una task interna de forma aislada y no deshabilita tareas, gates o triggers. Si otro stage depende del destino mediante condiciones, existen environmentTriggers o aparecen condiciones desconocidas, el plan se rechaza. Esto puede bloquear las definiciones de tu empresa hasta revisar sus dependencias; nunca se eliminarán automáticamente.
+Esta versión solo implementa `environmentRedeploy` para stages de Classic Releases. No ejecuta una task interna de forma aislada y no deshabilita tareas, gates o triggers. Por defecto se rechazan dependencias de otros stages hacia el destino; `downstreamPolicy: allow` permite las conocidas con advertencia. Los environmentTriggers y tipos de condición desconocidos siempre se rechazan; ninguna dependencia se elimina automáticamente.
 
 El control verifica la configuración incluida en la instancia. No puede detectar automatizaciones externas, service hooks o acciones de otros sistemas. El éxito representa el estado del despliegue en Azure; no prueba por sí solo la salud funcional de la aplicación. Health checks arbitrarios no están implementados.
 
@@ -182,3 +182,55 @@ En `ado_plan_operation`, ejecuta:
 ```
 
 Abre el `reviewUrl` y verifica el release y stage concretos resueltos. El catálogo de ejemplo también requiere las variables indicadas: adáptalas a variables no secretas de tu release de prueba. Validar YAML no comprueba su existencia. Si prefieres Copilot, detén Inspector e inicia el servidor desde `.vscode/mcp.json`; ambas interfaces usan el mismo motor.
+
+## Políticas explícitas de downstream y valores sin cambios
+
+`deployment.downstreamPolicy` admite `reject` (predeterminado, comportamiento anterior) y `allow`. `allow` permite únicamente la dependencia conocida `environmentState` de otro stage hacia el seleccionado. El plan y el panel muestran `DOWNSTREAM_DEPENDENCY`, los IDs y nombres de los dependientes directos y la posibilidad de ejecuciones posteriores decididas por Azure. También se devuelven en las tools de planificación y estado. No implica que esos stages necesariamente vayan a ejecutarse ni que estén aislados; pueden existir dependencias transitivas. No se alteran condiciones, aprobadores, tareas ni triggers.
+
+Se siguen rechazando triggers de environment, tipos de condición desconocidos, despliegues activos/queued/scheduled, releases inactivos o incorrectos, stages con identidad distinta y organizaciones fuera del allowlist. Las comprobaciones se repiten antes de escribir y antes del redeploy. Un cambio de dependencias tras la revisión invalida la huella del plan.
+
+`deployment.redeployWhenUnchanged` es `false` por defecto y mantiene `NO_CHANGES` si todos los valores coinciden. Con `true`, puede prepararse y ejecutarse el plan: se omite la actualización de variables si todo está igual, se verifica otra vez el release y se solicita redeploy. Los resultados inciertos no se reintentan automáticamente. La restauración de una operación de este tipo puede volver a desplegar esos mismos valores. El rollback conserva la política original y presenta de nuevo las advertencias.
+
+El resultado `succeeded` corresponde solo al intento del stage seleccionado, no al estado de todos sus descendientes. Si un stage posterior sigue activo, las guardas bloquearán nuevas operaciones o restauraciones sobre ese release hasta que termine. El panel muestra las capacidades actuales del proceso; las tools no habilitan escrituras ni aprobaciones.
+
+## Consultas y prueba con Copilot
+
+Las tres tools nuevas no requieren catálogo ni permisos de escritura: usan lectura de Releases (`vso.release`) y los permisos del usuario sobre el recurso. `organization` y `project` usan los valores de configuración cuando se omiten, respetando `AZDO_ALLOWED_ORGANIZATIONS` antes de cualquier petición.
+
+`ado_list_releases` acepta filtros opcionales `definitionId` o `definitionName` (nunca ambos), `status` (`active`, `draft`, `abandoned`), `sourceBranch` como `refs/heads/main`, `top` (1–100, predeterminado 50) y `continuationToken`. Devuelve `items` y token cuando haya otra página. Para continuar usa los mismos filtros y el token anterior. Sin `status` se usa el comportamiento de listado de Azure. Los datos se proyectan a una lista permitida de campos; jamás se devuelve el release crudo.
+
+`ado_get_release` recibe `releaseId`. `ado_get_latest_release` exige exactamente `definitionId` o `definitionName`; su estrategia predeterminada es `latestCreated`. Para `latestSuccessfulDeployment` se requiere `environmentName`. Ambas estrategias llaman a la misma selección que OperationEngine. `selection: explicit` en YAML sigue seleccionando directamente el ID y las guardas verifican su pertenencia y estado; para consulta directa usa `ado_get_release`.
+
+Los nombres son literales, no apodos ni búsquedas aproximadas. Primero consulta las definiciones si desconoces el nombre exacto. Las tools de variables originales consultan la definición, no los valores de una instancia; las nuevas tools de lectura de releases no devuelven variables. El plan sí lee las variables de la instancia elegida y muestra las no secretas afectadas en la revisión local.
+
+Ejemplos de prompts usando el catálogo genérico de `examples/operations.services.yaml`:
+
+- «Usa ado_get_latest_release para consultar el último release activo de Example Catalog Service y mostrar su releaseId, fecha y stages».
+- «Usa ado_list_releases para listar los últimos 5 releases activos de Example Identity Service».
+- «Consulta el release con ID 987 y muestra el estado de Deploy Certification» (reemplaza el ID por uno obtenido de Azure).
+- «Prepara catalog-mocks en modo enabled y dame el enlace de revisión y sus advertencias».
+- «Prepara catalog-mocks en modo disabled y dame el enlace de revisión».
+- «Prepara identity-mocks en modo enabled y dame el enlace de revisión».
+- «Prepara identity-mocks en modo disabled y dame el enlace de revisión».
+
+En PowerShell, desde la raíz del proyecto:
+
+```powershell
+npm.cmd ci
+npm.cmd run check
+npm.cmd run build
+npm.cmd run format:check
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+if (-not (Test-Path operations.local.yaml)) {
+    Copy-Item examples/operations.services.yaml operations.local.yaml
+}
+notepad.exe operations.local.yaml
+notepad.exe .env
+npm.cmd run catalog:validate -- operations.local.yaml
+```
+
+Si ya existe el catálogo local, adáptalo sin sobrescribirlo: usa destinos y variables reales no secretas, y añade las políticas deseadas. En `.env`, configura `AZDO_OPERATIONS_FILE` con su ruta absoluta y conserva inicialmente `AZDO_ENABLE_WRITES=false` y `AZDO_ENABLE_APPROVALS=false`. No se necesita habilitar escrituras para consultar, planificar o revisar. Inicia o reinicia `azure-devops-classic` desde `.vscode/mcp.json` y habilita sus herramientas en Copilot. Hay 10 tools de lectura siempre disponibles y 6 de operaciones cuando se configura el catálogo (16 en total).
+
+Tras verificar el plan, las advertencias y permisos en un release de prueba, habilitar `AZDO_ENABLE_WRITES=true` y reiniciar permite aplicar únicamente desde el panel. Esto no habilita decisiones de aprobación: requieren además el flag y la política explícitos existentes. No ejecutes Inspector y Copilot simultáneamente contra el mismo estado. Las pruebas automatizadas usan datos sintéticos; no prueban las políticas ni el disparo de stages de tu organización.
+
+Referencias oficiales: [listado de releases](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/list?view=azure-devops-rest-7.1) y [listado de definiciones](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/definitions/list?view=azure-devops-rest-7.1).

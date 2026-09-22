@@ -1,0 +1,58 @@
+# Ejemplo genérico: reemplazar todos los destinos y variables con los de tu entorno.
+schemaVersion: "1"
+targets:
+  catalog-certification:
+    organization: example-org
+    project: Example Project
+    definition:
+      name: Example Catalog Service
+    environment:
+      name: Deploy Certification
+    selection:
+      strategy: latestCreated
+  identity-certification:
+    organization: example-org
+    project: Example Project
+    definition:
+      name: Example Identity Service
+    environment:
+      name: Deploy Certification
+    selection:
+      strategy: latestCreated
+operations:
+  catalog-mocks:
+    description: Activar o desactivar simulación del servicio de catálogo
+    target: catalog-certification
+    modes: [enabled, disabled]
+    variables:
+      - name: integration-simulation
+        scope: release
+        mustExist: true
+        values:
+          enabled: "true"
+          disabled: "false"
+    deployment:
+      strategy: environmentRedeploy
+      downstreamPolicy: allow
+      redeployWhenUnchanged: true
+    approvals: external
+    planTtlMinutes: 15
+    trackingTimeoutMinutes: 1440
+  identity-mocks:
+    description: Activar o desactivar simulación del servicio de identidad
+    target: identity-certification
+    modes: [enabled, disabled]
+    variables:
+      - name: api-simulation
+        scope: release
+        mustExist: true
+        values:
+          enabled: "true"
+          disabled: "false"
+    deployment:
+      strategy: environmentRedeploy
+      downstreamPolicy: allow
+      redeployWhenUnchanged: true
+    approvals: external
+    planTtlMinutes: 15
+    trackingTimeoutMinutes: 1440

@@ -90,7 +90,10 @@ export async function startReviewServer(
         if (!match) throw new AppError("NOT_FOUND", "Unknown endpoint.");
         const id = match[1]!;
         if (req.method === "GET" && !match[2]) {
-          send(res, 200, await engine.get(id));
+          send(res, 200, {
+            ...(await engine.get(id)),
+            capabilities: engine.reviewCapabilities(),
+          });
           return;
         }
         if (

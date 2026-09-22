@@ -58,7 +58,11 @@ export const catalogSchema = z
           modes: z.array(key).min(1).max(20),
           variables: z.array(change).min(1).max(50),
           deployment: z
-            .object({ strategy: z.literal("environmentRedeploy") })
+            .object({
+              strategy: z.literal("environmentRedeploy"),
+              downstreamPolicy: z.enum(["reject", "allow"]).default("reject"),
+              redeployWhenUnchanged: z.boolean().default(false),
+            })
             .strict(),
           approvals: z.enum(["external", "explicit"]).default("external"),
           planTtlMinutes: z.number().int().min(1).max(60).default(15),

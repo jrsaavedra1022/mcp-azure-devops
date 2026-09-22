@@ -38,7 +38,11 @@ export function registerOperationTools(
           state: r.state,
           releaseId: r.releaseId,
           releaseName: r.releaseName,
+          definitionId: r.target.definitionId,
           environment: r.environmentName,
+          environmentId: r.environmentId,
+          warningCount: (r.warnings ?? []).length,
+          warnings: r.warnings ?? [],
           changeCount: r.changes.length,
           reviewUrl: runtime.review.url(r.id),
         };
@@ -59,6 +63,7 @@ export function registerOperationTools(
           id: r.id,
           state: r.state,
           events: r.events,
+          warnings: r.warnings ?? [],
           error: r.error,
           approvals: r.approvals,
           reviewUrl: runtime.review.url(r.id),
@@ -88,6 +93,13 @@ export function registerOperationTools(
         return {
           id: r.id,
           state: r.state,
+          releaseId: r.releaseId,
+          releaseName: r.releaseName,
+          definitionId: r.target.definitionId,
+          environment: r.environmentName,
+          environmentId: r.environmentId,
+          warningCount: (r.warnings ?? []).length,
+          warnings: r.warnings ?? [],
           reviewUrl: runtime.review.url(r.id),
         };
       }),

@@ -29,3 +29,9 @@ Las pruebas unitarias usan un gateway en memoria. Las de protocolo usan el clien
 `CatalogTarget` modela referencias exclusivas por nombre o por ID; `Target` es el contrato canónico persistido, exclusivamente por IDs. `ReleaseGateway.resolveTarget` convierte entre ambos antes de seleccionar el release. `AzureReleaseGateway` realiza las lecturas REST; `target-resolver.ts` resuelve el environment sobre la definición y construye el target. DemoGateway implementa el mismo contrato con datos sintéticos.
 
 El motor valida el allowlist antes de resolver. No ejecuta REST directamente y conserva sus guardas. Resolver no escribe, no conserva una caché y nunca forma parte de apply, refresh o rollback. El límite de paginación falla de forma explícita para no confundir una búsqueda incompleta con unicidad. Se preserva el recorrido sin consultas adicionales para targets históricos con ambos IDs.
+
+## Consultas públicas y políticas de despliegue
+
+`ReleaseQueryService` valida inputs y ámbito usando el mismo resolvedor de scope que `DevOpsService`. Las tools delegan sin HTTP propio a `AzureReleaseGateway`, que comparte `resolveDefinition`, `resolveTarget` y `select` con las operaciones. La proyección de `release-metadata.ts` elimina campos no autorizados en cada nivel y mantiene separados los snapshots operacionales crudos de las respuestas públicas.
+
+Las políticas downstream y redeploy sin cambios forman parte del catálogo y del plan persistido. No cambian la identidad, huella ni control de concurrencia. Registros antiguos sin estos campos se interpretan como reject/false. Los warnings son opcionales en registros históricos y se generan a partir del snapshot durante cada planificación/restauración. Las capacidades de escritura del panel se obtienen del proceso actual, nunca de un flag persistido o aportado por el navegador.

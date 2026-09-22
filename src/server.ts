@@ -1,3 +1,6 @@
+import { registerReleaseTools } from "./tools/releases.js";
+import { ReleaseQueryService } from "./services/release-query-service.js";
+import { AzureReleaseGateway } from "./operations/gateway.js";
 import { registerOperationTools } from "./tools/operations.js";
 import type { OperationsRuntime } from "./operations/runtime.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -14,6 +17,7 @@ export function createServer(
   config: Config,
   reader?: DevOpsReader,
   operations?: OperationsRuntime,
+  releaseGateway?: AzureReleaseGateway,
 ) {
   const server = new McpServer({
     name: "azure-devops-classic-mcp",
@@ -25,6 +29,16 @@ export function createServer(
       config,
       reader ??
         new AzureDevOpsAdapter(
+          new RestClient(config, createLogger(config.logLevel)),
+        ),
+    ),
+  );
+  registerReleaseTools(
+    server,
+    new ReleaseQueryService(
+      config,
+      releaseGateway ??
+        new AzureReleaseGateway(
           new RestClient(config, createLogger(config.logLevel)),
         ),
     ),

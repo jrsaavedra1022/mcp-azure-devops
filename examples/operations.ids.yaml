@@ -29,6 +29,10 @@ operations:
           live: "production-service"
     deployment:
       strategy: environmentRedeploy
+      # allow acepta dependencias conocidas y muestra advertencias; no las modifica.
+      downstreamPolicy: reject
+      # true permite reaplicar la configuración actual sin actualizar variables.
+      redeployWhenUnchanged: false
     approvals: external
     planTtlMinutes: 15
     trackingTimeoutMinutes: 1440

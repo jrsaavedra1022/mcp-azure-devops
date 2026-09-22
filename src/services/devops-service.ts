@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Config } from "../config.js";
-import { organizationSchema, projectSchema } from "../config.js";
+import { resolveOrganization, resolveScope } from "./scope.js";
 import type {
   Definition,
   DevOpsReader,
@@ -48,25 +48,11 @@ export class DevOpsService {
     };
   }
   private org(scope: Scope) {
-    const org = scope.organization ?? this.config.organization;
-    if (!organizationSchema.safeParse(org).success)
-      throw new AppError("INVALID_SCOPE", "Provide a valid organization.");
-    if (
-      this.config.allowedOrganizations.length &&
-      !this.config.allowedOrganizations.includes(org!)
-    )
-      throw new AppError(
-        "FORBIDDEN_SCOPE",
-        "Organization is outside the configured allowlist.",
-      );
-    return org!;
+    return resolveOrganization(this.config, scope);
   }
   private scope(scope: Scope) {
-    const org = this.org(scope);
-    const project = scope.project ?? this.config.project;
-    if (!projectSchema.safeParse(project).success)
-      throw new AppError("INVALID_SCOPE", "Provide a valid project.");
-    return { org, project: project! };
+    const s = resolveScope(this.config, scope);
+    return { org: s.organization, project: s.project };
   }
   projects(scope: Scope, page: PageInput) {
     return this.reader.projects(this.org(scope), page);

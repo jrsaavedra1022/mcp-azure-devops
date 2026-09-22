@@ -383,7 +383,7 @@ test("new MCP tools expose planning and status but no apply bypass", async () =>
     await server.connect(a);
     await client.connect(b);
     const names = (await client.listTools()).tools.map((t) => t.name);
-    assert.equal(names.length, 13);
+    assert.equal(names.length, 16);
     assert.ok(!names.some((n) => n.includes("apply")));
     const r = await client.callTool({
       name: "ado_plan_operation",

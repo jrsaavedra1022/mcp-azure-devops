@@ -1,3 +1,4 @@
+import { artifactMetadataSchema } from "../services/release-metadata.js";
 import { matchesBranch } from "./gateway.js";
 import { randomUUID } from "node:crypto";
 import { AppError, safeError } from "../errors.js";
@@ -50,6 +51,11 @@ export interface Execution {
   expectedAttempt: number;
   changes: Delta[];
   artifacts: unknown[];
+  warnings?: {
+    code: string;
+    message: string;
+    stages: { id: number; name: string }[];
+  }[];
   state: State;
   createdAt: string;
   expiresAt: string;
@@ -117,7 +123,7 @@ export class OperationEngine {
   private event(r: Execution, message: string) {
     r.events.push({ at: new Date(this.now()).toISOString(), message });
   }
-  private guard(t: Target, r: Release): Environment {
+  private guard(t: Target, r: Release, policy: Operation): Environment {
     if (this.allowed.length && !this.allowed.includes(t.organization))
       throw new AppError("FORBIDDEN_SCOPE", "Organization outside allowlist.");
     if (r.releaseDefinition.id !== t.definitionId || r.status !== "active")
@@ -146,7 +152,7 @@ export class OperationEngine {
         "DEPLOYMENT_BUSY",
         "A deployment is active, queued or scheduled in this release.",
       );
-    // Fail closed for downstream stage dependencies, auto-redeploy and unknown trigger forms.
+    // Only known downstream dependencies are policy-controlled; unknown triggers always fail closed.
     for (const other of r.environments) {
       if (other.environmentTriggers.length)
         throw new AppError(
@@ -163,6 +169,7 @@ export class OperationEngine {
           "Unknown stage condition type.",
         );
       if (
+        policy.deployment.downstreamPolicy !== "allow" &&
         other.id !== env.id &&
         other.conditions.some(
           (c) =>
@@ -176,6 +183,34 @@ export class OperationEngine {
         );
     }
     return env;
+  }
+  reviewCapabilities() {
+    return {
+      writesEnabled: this.writes,
+      approvalsEnabled: this.writes && this.approvalWrites,
+    };
+  }
+  private downstreamWarnings(release: Release, env: Environment) {
+    const stages = release.environments
+      .filter(
+        (other) =>
+          other.id !== env.id &&
+          other.conditions.some(
+            (c) =>
+              c.conditionType === "environmentState" &&
+              c.name.toLowerCase() === env.name.toLowerCase(),
+          ),
+      )
+      .map((e) => ({ id: e.id, name: e.name }));
+    return stages.length
+      ? [
+          {
+            code: "DOWNSTREAM_DEPENDENCY",
+            message: `${env.name} has downstream stage dependencies. Azure DevOps may trigger subsequent stages according to the release configuration. Tracking covers only the selected stage.`,
+            stages,
+          },
+        ]
+      : [];
   }
   private fingerprint(r: Release) {
     // Whole snapshot, including configuration and variables, except server-maintained timestamps/identities/links.
@@ -221,7 +256,7 @@ export class OperationEngine {
       throw new AppError("FORBIDDEN_SCOPE", "Organization outside allowlist.");
     const target = await this.gateway.resolveTarget(reference);
     const release = await this.gateway.select(target),
-      env = this.guard(target, release);
+      env = this.guard(target, release, op);
     const changes = op.variables.map((v) => {
       const before = this.readVariable(
         this.variables(release, env.id, v.scope),
@@ -258,7 +293,10 @@ export class OperationEngine {
     changes: Delta[],
     rollbackOf?: string,
   ) {
-    if (changes.every((d) => digest(d.before) === digest(d.after)))
+    if (
+      !policy.deployment.redeployWhenUnchanged &&
+      changes.every((d) => digest(d.before) === digest(d.after))
+    )
       throw new AppError(
         "NO_CHANGES",
         "Values already match; no deployment requested.",
@@ -278,14 +316,8 @@ export class OperationEngine {
       expectedAttempt:
         Math.max(0, ...env.deploySteps.map((s) => s.attempt)) + 1,
       changes,
-      artifacts: release.artifacts.map((a) => {
-        const x = a as Record<string, unknown>;
-        return {
-          alias: x.alias,
-          type: x.type,
-          definitionReference: x.definitionReference,
-        };
-      }),
+      warnings: this.downstreamWarnings(release, env),
+      artifacts: release.artifacts.map((a) => artifactMetadataSchema.parse(a)),
       state: "planned",
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: new Date(
@@ -386,7 +418,7 @@ export class OperationEngine {
           "An unresolved execution owns this release. Inspect or recover it first.",
         );
       const current = await this.gateway.get(r.target, r.releaseId);
-      this.guard(r.target, current);
+      this.guard(r.target, current, r.policy);
       if (this.fingerprint(current) !== r.fingerprint)
         throw new AppError(
           "CONFLICT",
@@ -397,11 +429,21 @@ export class OperationEngine {
         if (d.after === null) delete vars[d.name];
         else vars[d.name] = structuredClone(d.after);
       }
-      r.state = "writing";
-      this.event(r, "Local review accepted; saving variables.");
-      await this.store.put(r);
-      mutation = true;
-      await this.gateway.update(r.target, current);
+      const valuesChanged = r.changes.some(
+        (d) => digest(d.before) !== digest(d.after),
+      );
+      if (valuesChanged) {
+        r.state = "writing";
+        this.event(r, "Local review accepted; saving variables.");
+        await this.store.put(r);
+        mutation = true;
+        await this.gateway.update(r.target, current);
+      } else {
+        this.event(
+          r,
+          "Values unchanged; local review accepted for redeploy only. No variable update required.",
+        );
+      }
       const saved = await this.gateway.get(r.target, r.releaseId);
       for (const d of r.changes)
         if (
@@ -419,9 +461,14 @@ export class OperationEngine {
           "Other release fields changed while saving. Redeploy was not requested.",
         );
       r.state = "variablesUpdated";
-      this.event(r, "Variables saved and verified.");
+      this.event(
+        r,
+        valuesChanged
+          ? "Variables saved and verified."
+          : "Unchanged variables verified before redeploy.",
+      );
       await this.store.put(r);
-      this.guard(r.target, saved);
+      this.guard(r.target, saved, r.policy);
       r.state = "requestingDeployment";
       r.deploymentRequestedAt = new Date(this.now()).toISOString();
       r.deadline = new Date(
@@ -429,6 +476,7 @@ export class OperationEngine {
       ).toISOString();
       this.event(r, "Requesting environment redeploy.");
       await this.store.put(r);
+      mutation = true;
       await this.gateway.deploy(
         r.target,
         r.releaseId,
@@ -643,7 +691,7 @@ export class OperationEngine {
         "Restore with the original reviewed catalog version.",
       );
     const release = await this.gateway.get(previous.target, previous.releaseId),
-      env = this.guard(previous.target, release);
+      env = this.guard(previous.target, release, previous.policy);
     const changes = previous.changes.map((d) => {
       const current = this.readVariable(
         this.variables(release, env.id, d.scope),

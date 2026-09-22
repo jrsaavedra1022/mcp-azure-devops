@@ -2,6 +2,10 @@ import { z } from "zod";
 import { RestClient } from "../client/rest-client.js";
 import { AppError } from "../errors.js";
 import { resolveEnvironmentTarget } from "./target-resolver.js";
+import {
+  releaseMetadataSchema,
+  safeReleaseMetadata,
+} from "../services/release-metadata.js";
 import type { CatalogTarget, Target } from "./catalog.js";
 const variable = z
   .object({
@@ -68,6 +72,14 @@ export interface Approval {
   approvalType: string;
   approver: string;
 }
+export type ReleaseScope = Pick<Target, "organization" | "project">;
+export type DefinitionReference =
+  { definitionId: number } | { definitionName: string };
+export type ReleaseSelection = ReleaseScope & {
+  definitionId: number;
+  selection: Target["selection"];
+  environment?: Target["environment"];
+};
 export interface ReleaseGateway {
   resolveTarget(t: CatalogTarget): Promise<Target>;
   select(t: Target): Promise<Release>;
@@ -92,10 +104,13 @@ export class AzureReleaseGateway implements ReleaseGateway {
   private path(t: Pick<Target, "organization" | "project">, ...tail: string[]) {
     return [t.organization, t.project, "_apis", "release", ...tail];
   }
-  async resolveTarget(t: CatalogTarget): Promise<Target> {
+  async resolveDefinition(
+    t: ReleaseScope,
+    reference: DefinitionReference,
+  ): Promise<number> {
     let definitionId: number;
-    if ("definitionId" in t) {
-      definitionId = t.definitionId;
+    if ("definitionId" in reference) {
+      definitionId = reference.definitionId;
     } else {
       const ids = new Set<number>();
       let token: string | undefined;
@@ -109,7 +124,7 @@ export class AzureReleaseGateway implements ReleaseGateway {
           "release",
           this.path(t, "definitions"),
           {
-            searchText: t.definition.name,
+            searchText: reference.definitionName,
             isExactNameMatch: "true",
             isDeleted: "false",
             $top: 100,
@@ -124,11 +139,11 @@ export class AzureReleaseGateway implements ReleaseGateway {
           })
           .parse(response.data).value;
         for (const row of rows)
-          if (row.name === t.definition.name) ids.add(row.id);
+          if (row.name === reference.definitionName) ids.add(row.id);
         if (ids.size > 1)
           throw new AppError(
             "AMBIGUOUS_RELEASE_DEFINITION",
-            `Multiple release definitions matched "${t.definition.name}".`,
+            `Multiple release definitions matched "${reference.definitionName}".`,
           );
         token = response.continuationToken;
         if (!token) break;
@@ -136,10 +151,19 @@ export class AzureReleaseGateway implements ReleaseGateway {
       if (!ids.size)
         throw new AppError(
           "RELEASE_DEFINITION_NOT_FOUND",
-          `Release definition "${t.definition.name}" was not found.`,
+          `Release definition "${reference.definitionName}" was not found.`,
         );
       definitionId = [...ids][0]!;
     }
+    return definitionId;
+  }
+  async resolveTarget(t: CatalogTarget): Promise<Target> {
+    const definitionId = await this.resolveDefinition(
+      t,
+      "definitionId" in t
+        ? { definitionId: t.definitionId }
+        : { definitionName: t.definition.name },
+    );
     // Preserve the legacy ID-only path without extra requests.
     if ("definitionId" in t && "definitionEnvironmentId" in t.environment) {
       return {
@@ -177,13 +201,55 @@ export class AzureReleaseGateway implements ReleaseGateway {
     }
     return resolveEnvironmentTarget(t, definition);
   }
-  async get(t: Target, id: number) {
-    return releaseSchema.parse(
-      (await this.client.get("release", this.path(t, "releases", String(id))))
-        .data,
-    );
+  private async releaseData(t: ReleaseScope, id: number) {
+    try {
+      return (
+        await this.client.get("release", this.path(t, "releases", String(id)))
+      ).data;
+    } catch (e) {
+      if (e instanceof AppError && e.status === 404)
+        throw new AppError("RELEASE_NOT_FOUND", "Release was not found.", 404);
+      throw e;
+    }
   }
-  async select(t: Target) {
+  async get(t: ReleaseScope, id: number) {
+    return releaseSchema.parse(await this.releaseData(t, id));
+  }
+  async getMetadata(t: ReleaseScope, id: number) {
+    return safeReleaseMetadata(await this.releaseData(t, id));
+  }
+  async list(
+    t: ReleaseScope,
+    query: {
+      definitionId?: number;
+      status?: string;
+      top: number;
+      continuationToken?: string;
+      sourceBranch?: string;
+    },
+  ) {
+    const response = await this.client.get(
+      "release",
+      this.path(t, "releases"),
+      {
+        definitionId: query.definitionId,
+        statusFilter: query.status,
+        $top: query.top,
+        continuationToken: query.continuationToken,
+        sourceBranchFilter: query.sourceBranch,
+        queryOrder: "descending",
+        $expand: "environments,artifacts",
+      },
+    );
+    const rows = z
+      .object({ value: z.array(releaseMetadataSchema) })
+      .parse(response.data).value;
+    return {
+      items: rows.map(safeReleaseMetadata),
+      continuationToken: response.continuationToken,
+    };
+  }
+  async select(t: ReleaseSelection) {
     if (t.selection.strategy === "explicit")
       return this.get(t, t.selection.releaseId!);
     if (t.selection.strategy === "latestCreated") {
@@ -198,9 +264,14 @@ export class AzureReleaseGateway implements ReleaseGateway {
         .object({ value: z.array(z.object({ id: z.number() })) })
         .parse(r.data).value;
       if (!items[0])
-        throw new AppError("NOT_FOUND", "No matching active release.");
+        throw new AppError("RELEASE_NOT_FOUND", "No matching active release.");
       return this.get(t, items[0].id);
     }
+    if (!t.environment)
+      throw new AppError(
+        "INVALID_INPUT",
+        "An environment is required for latestSuccessfulDeployment.",
+      );
     // Deployment history, not release creation time. Fail if bounded history is exhausted.
     let token: string | undefined;
     for (let page = 0; page < 20; page++) {
@@ -231,7 +302,7 @@ export class AzureReleaseGateway implements ReleaseGateway {
       token = r.continuationToken;
       if (!token)
         throw new AppError(
-          "NOT_FOUND",
+          "RELEASE_NOT_FOUND",
           "No active release with a matching successful deployment.",
         );
     }
