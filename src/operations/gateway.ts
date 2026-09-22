@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { RestClient } from "../client/rest-client.js";
 import { AppError } from "../errors.js";
-import type { Target } from "./catalog.js";
+import { resolveEnvironmentTarget } from "./target-resolver.js";
+import type { CatalogTarget, Target } from "./catalog.js";
 const variable = z
   .object({
     value: z.string().nullable().optional(),
@@ -68,6 +69,7 @@ export interface Approval {
   approver: string;
 }
 export interface ReleaseGateway {
+  resolveTarget(t: CatalogTarget): Promise<Target>;
   select(t: Target): Promise<Release>;
   get(t: Target, id: number): Promise<Release>;
   update(t: Target, release: Release): Promise<void>;
@@ -87,8 +89,93 @@ export interface ReleaseGateway {
 }
 export class AzureReleaseGateway implements ReleaseGateway {
   constructor(private client: RestClient) {}
-  private path(t: Target, ...tail: string[]) {
+  private path(t: Pick<Target, "organization" | "project">, ...tail: string[]) {
     return [t.organization, t.project, "_apis", "release", ...tail];
+  }
+  async resolveTarget(t: CatalogTarget): Promise<Target> {
+    let definitionId: number;
+    if ("definitionId" in t) {
+      definitionId = t.definitionId;
+    } else {
+      const ids = new Set<number>();
+      let token: string | undefined;
+      for (let page = 0; ; page++) {
+        if (page === 20)
+          throw new AppError(
+            "SEARCH_LIMIT",
+            "Definition search limit exceeded. Use explicit IDs.",
+          );
+        const response = await this.client.get(
+          "release",
+          this.path(t, "definitions"),
+          {
+            searchText: t.definition.name,
+            isExactNameMatch: "true",
+            isDeleted: "false",
+            $top: 100,
+            continuationToken: token,
+          },
+        );
+        const rows = z
+          .object({
+            value: z.array(
+              z.object({ id: z.number().int().positive(), name: z.string() }),
+            ),
+          })
+          .parse(response.data).value;
+        for (const row of rows)
+          if (row.name === t.definition.name) ids.add(row.id);
+        if (ids.size > 1)
+          throw new AppError(
+            "AMBIGUOUS_RELEASE_DEFINITION",
+            `Multiple release definitions matched "${t.definition.name}".`,
+          );
+        token = response.continuationToken;
+        if (!token) break;
+      }
+      if (!ids.size)
+        throw new AppError(
+          "RELEASE_DEFINITION_NOT_FOUND",
+          `Release definition "${t.definition.name}" was not found.`,
+        );
+      definitionId = [...ids][0]!;
+    }
+    // Preserve the legacy ID-only path without extra requests.
+    if ("definitionId" in t && "definitionEnvironmentId" in t.environment) {
+      return {
+        organization: t.organization,
+        project: t.project,
+        selection: { ...t.selection },
+        definitionId,
+        environment: { ...t.environment },
+      };
+    }
+    const definition = z
+      .object({
+        id: z.number().int().positive(),
+        name: z.string(),
+        environments: z.array(
+          z.object({ id: z.number().int().positive(), name: z.string() }),
+        ),
+      })
+      .parse(
+        (
+          await this.client.get(
+            "release",
+            this.path(t, "definitions", String(definitionId)),
+          )
+        ).data,
+      );
+    if (
+      definition.id !== definitionId ||
+      ("definition" in t && definition.name !== t.definition.name)
+    ) {
+      throw new AppError(
+        "TARGET_CHANGED",
+        "Release definition identity changed during resolution. Create a new plan.",
+      );
+    }
+    return resolveEnvironmentTarget(t, definition);
   }
   async get(t: Target, id: number) {
     return releaseSchema.parse(

@@ -3,10 +3,10 @@ targets:
   certification:
     organization: example-org
     project: Example Project
-    definition:
-      name: Example Application
+    definitionId: 123
     environment:
-      name: Deploy Certification
+      definitionEnvironmentId: 456
+      expectedName: Deploy Certification
     selection:
       strategy: latestSuccessfulDeployment
 operations:

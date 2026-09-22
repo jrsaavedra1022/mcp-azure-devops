@@ -216,9 +216,10 @@ export class OperationEngine {
       : undefined;
     if (!op || !op.modes.includes(mode))
       throw new AppError("INVALID_OPERATION", "Unknown operation or mode.");
-    const target = catalog.targets[op.target]!;
-    if (this.allowed.length && !this.allowed.includes(target.organization))
+    const reference = catalog.targets[op.target]!;
+    if (this.allowed.length && !this.allowed.includes(reference.organization))
       throw new AppError("FORBIDDEN_SCOPE", "Organization outside allowlist.");
+    const target = await this.gateway.resolveTarget(reference);
     const release = await this.gateway.select(target),
       env = this.guard(target, release);
     const changes = op.variables.map((v) => {

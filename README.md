@@ -26,7 +26,7 @@ npm run build
 node --env-file=.env dist/index.js
 ```
 
-Edita `.env` y el catálogo antes de conectar. El ejemplo tiene IDs ficticios. No se cargan archivos `.env` automáticamente. Consulta [la guía completa de operaciones](docs/OPERATIONS.md) para configuración, permisos, restricciones y recuperación. La configuración de lectura original se documenta en [READ_ONLY.md](docs/READ_ONLY.md); sus referencias a solo lectura describen ese módulo original.
+Edita `.env` y el catálogo antes de conectar. Los ejemplos tienen nombres e IDs ficticios. No se cargan archivos `.env` automáticamente. Consulta [la guía completa de operaciones](docs/OPERATIONS.md) para configuración, permisos, restricciones y recuperación. La configuración de lectura original se documenta en [READ_ONLY.md](docs/READ_ONLY.md); sus referencias a solo lectura describen ese módulo original.
 
 ## Copilot en VS Code
 
@@ -39,6 +39,30 @@ La configuración usa Node desde el PATH y carga el `.env` local; no contiene cr
 Reinicia el servidor después de recompilar o cambiar `.env`. Para las operaciones YAML, consulta [la guía de operaciones](docs/OPERATIONS.md#uso-con-copilot). No ejecutes Inspector y Copilot simultáneamente contra el mismo directorio de estado.
 
 Esta configuración corresponde a Copilot en VS Code; Copilot CLI utiliza su propia configuración. Referencia: [administrar servidores MCP en VS Code](https://code.visualstudio.com/docs/agent-customization/mcp-servers).
+
+## Targets por nombre o por ID
+
+La forma recomendada evita buscar IDs manualmente:
+
+```yaml
+definition:
+  name: Example Application
+environment:
+  name: Deploy Certification
+```
+
+La forma avanzada sigue siendo compatible:
+
+```yaml
+definitionId: 123
+environment:
+  definitionEnvironmentId: 456
+  expectedName: Deploy Certification
+```
+
+Usa una sola forma para cada referencia. Durante la planificación, el gateway resuelve nombres exactos (incluidas mayúsculas y espacios) y rechaza resultados ausentes o ambiguos. El plan guarda IDs concretos; ejecución, seguimiento y restauración no vuelven a resolver nombres. Cambiar el catálogo invalida un plan pendiente.
+
+[`examples/operations.yaml`](examples/operations.yaml) muestra nombres; [`examples/operations.ids.yaml`](examples/operations.ids.yaml) muestra IDs. `catalog:validate` comprueba ambos formatos sin conectarse a Azure. La existencia se verifica al planificar. Consulta [los pasos para Windows](docs/OPERATIONS.md#prueba-en-windows-powershell).
 
 ## Capacidades
 

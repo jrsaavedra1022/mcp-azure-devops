@@ -29,7 +29,7 @@ class MemoryStore implements RecordStore<Execution> {
   }
 }
 async function setup() {
-  const c = await loadCatalog(resolve("examples/operations.yaml"));
+  const c = await loadCatalog(resolve("examples/operations.ids.yaml"));
   const gateway = new DemoGateway(),
     store = new MemoryStore();
   const engine = new OperationEngine(
@@ -358,7 +358,7 @@ test("last successful selection follows deployments, skips abandoned releases an
     },
   );
   const r = await new AzureReleaseGateway(rest).select(
-    c.catalog.targets.certification!,
+    await gateway.resolveTarget(c.catalog.targets.certification!),
   );
   assert.equal(r.id, 987);
   assert.equal(seen, 2);

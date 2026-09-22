@@ -17,36 +17,38 @@ const change = z
     values: z.record(z.string().max(8192)),
   })
   .strict();
+const environmentReference = z.union([
+  z
+    .object({ definitionEnvironmentId: id, expectedName: z.string().min(1) })
+    .strict(),
+  z.object({ name: z.string().min(1) }).strict(),
+]);
+const targetBase = z.object({
+  organization: organizationSchema,
+  project: projectSchema,
+  environment: environmentReference,
+  selection: z
+    .object({
+      strategy: z.enum([
+        "latestCreated",
+        "latestSuccessfulDeployment",
+        "explicit",
+      ]),
+      releaseId: id.optional(),
+      sourceBranch: z.string().startsWith("refs/heads/").optional(),
+    })
+    .strict(),
+});
+export const targetSchema = z.union([
+  targetBase.extend({ definitionId: id }).strict(),
+  targetBase
+    .extend({ definition: z.object({ name: z.string().min(1) }).strict() })
+    .strict(),
+]);
 export const catalogSchema = z
   .object({
     schemaVersion: z.literal("1"),
-    targets: z.record(
-      key,
-      z
-        .object({
-          organization: organizationSchema,
-          project: projectSchema,
-          definitionId: id,
-          environment: z
-            .object({
-              definitionEnvironmentId: id,
-              expectedName: z.string().min(1),
-            })
-            .strict(),
-          selection: z
-            .object({
-              strategy: z.enum([
-                "latestCreated",
-                "latestSuccessfulDeployment",
-                "explicit",
-              ]),
-              releaseId: id.optional(),
-              sourceBranch: z.string().startsWith("refs/heads/").optional(),
-            })
-            .strict(),
-        })
-        .strict(),
-    ),
+    targets: z.record(key, targetSchema),
     operations: z.record(
       key,
       z
@@ -106,7 +108,15 @@ export const catalogSchema = z
         });
   });
 export type Catalog = z.infer<typeof catalogSchema>;
-export type Target = Catalog["targets"][string];
+export type CatalogTarget = Catalog["targets"][string];
+/** Canonical target persisted in plans. No unresolved names are allowed here. */
+export type Target = Pick<
+  CatalogTarget,
+  "organization" | "project" | "selection"
+> & {
+  definitionId: number;
+  environment: { definitionEnvironmentId: number; expectedName: string };
+};
 export type Operation = Catalog["operations"][string];
 export function digest(value: unknown): string {
   const stable = (v: unknown): unknown =>

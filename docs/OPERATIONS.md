@@ -135,3 +135,50 @@ Para agregar una estrategia: ampliar el esquema con una unión discriminada, imp
 - [Release Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/update-release?view=azure-devops-rest-7.1)
 - [Environment Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/update-release-environment?view=azure-devops-rest-7.1)
 - [Approvals Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/approvals/update?view=azure-devops-rest-7.1)
+
+## Resolución de targets
+
+El catálogo permite definir `definition.name` y `environment.name` en lugar de IDs. Los ejemplos completos están en `examples/operations.yaml` (recomendado, nombres) y `examples/operations.ids.yaml` (avanzado, IDs). Ambos mantienen `schemaVersion: "1"`.
+
+Cada target exige exactamente una referencia de definición (`definitionId` o `definition: { name: ... }`) y una referencia de environment (`definitionEnvironmentId` más `expectedName`, o `name`). Se pueden combinar definición por ID con environment por nombre, o viceversa, pero no mezclar dos formas dentro de la misma referencia.
+
+El gateway consulta la [API oficial de definiciones](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/definitions/list?view=azure-devops-rest-7.1) con `searchText` e `isExactNameMatch=true`. También compara nombres literalmente en el cliente y recorre la paginación. No se normalizan espacios ni mayúsculas. Dos definiciones con el mismo nombre en carpetas diferentes son ambiguas: usa IDs para desambiguar. La búsqueda tiene un límite de 20 páginas de 100; si no puede terminar, devuelve `SEARCH_LIMIT` sin seleccionar un resultado parcial.
+
+Después consulta la definición completa para obtener el ID del environment. Los errores `RELEASE_DEFINITION_NOT_FOUND`, `AMBIGUOUS_RELEASE_DEFINITION`, `ENVIRONMENT_NOT_FOUND` y `AMBIGUOUS_ENVIRONMENT` explican qué referencia corregir. Si la definición cambia de identidad o nombre entre ambas consultas, se devuelve `TARGET_CHANGED`.
+
+No hay caché de resolución: cada plan nuevo consulta Azure. El plan persistido contiene el target canónico por IDs, y las guardas siguen validando el release y stage elegidos. Una modificación posterior de nombre no redirige un plan; los cambios relevantes en el release lo invalidan. Cambiar el catálogo también invalida su aplicación. El flujo antiguo con ambos IDs no agrega consultas de resolución. Las estrategias `latestCreated`, `latestSuccessfulDeployment` y `explicit` conservan su comportamiento.
+
+## Prueba en Windows PowerShell
+
+Desde la raíz de tu copia local, con Node en el PATH:
+
+```powershell
+npm.cmd ci
+npm.cmd run check
+npm.cmd run format:check
+
+# Crear archivos locales solo si todavía no existen.
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+if (-not (Test-Path operations.local.yaml)) {
+    Copy-Item examples/operations.yaml operations.local.yaml
+}
+notepad.exe operations.local.yaml
+notepad.exe .env
+npm.cmd run catalog:validate -- operations.local.yaml
+```
+
+Reemplaza los nombres de organización, proyecto, definición y stage del YAML por los de tu entorno. Configura las credenciales en `.env`, que está excluido de Git. Añade allí `AZDO_OPERATIONS_FILE=C:/ruta/real/al/proyecto/operations.local.yaml` y conserva `AZDO_ENABLE_WRITES=false` y `AZDO_ENABLE_APPROVALS=false` para probar la resolución y revisión sin cambios en Azure.
+
+Inicia Inspector desde la misma carpeta:
+
+```powershell
+npx.cmd -y @modelcontextprotocol/inspector node --env-file=.env dist/index.js
+```
+
+En `ado_plan_operation`, ejecuta:
+
+```json
+{ "operation": "integration-mode", "mode": "simulated" }
+```
+
+Abre el `reviewUrl` y verifica el release y stage concretos resueltos. El catálogo de ejemplo también requiere las variables indicadas: adáptalas a variables no secretas de tu release de prueba. Validar YAML no comprueba su existencia. Si prefieres Copilot, detén Inspector e inicia el servidor desde `.vscode/mcp.json`; ambas interfaces usan el mismo motor.
