@@ -1,3 +1,4 @@
+import { normalizeVariables, variableDigest } from "./variable-state.js";
 import { artifactMetadataSchema } from "../services/release-metadata.js";
 import { matchesBranch } from "./gateway.js";
 import { randomUUID } from "node:crypto";
@@ -217,6 +218,13 @@ export class OperationEngine {
     const clean = { ...r };
     for (const key of ["modifiedOn", "modifiedBy", "_links", "url"])
       delete clean[key];
+    // Azure may omit false isSecret flags. Compare that representation equivalently,
+    // while preserving every other variable field and all actual secret flags.
+    clean.variables = normalizeVariables(r.variables);
+    clean.environments = r.environments.map((e) => ({
+      ...e,
+      variables: normalizeVariables(e.variables),
+    }));
     return digest(clean);
   }
   private variables(r: Release, envId: number, scope: Delta["scope"]) {
@@ -237,10 +245,10 @@ export class OperationEngine {
         "Variable casing must match exactly and be unique.",
       );
     const v = Object.hasOwn(vars, name) ? vars[name]! : null;
-    if (v && (v.isSecret !== false || typeof v.value !== "string"))
+    if (v && (v.isSecret === true || typeof v.value !== "string"))
       throw new AppError(
         "UNSUPPORTED_SECRET",
-        "Only explicitly non-secret string variables can be changed or restored.",
+        "Secret variables or variables without a visible string value cannot be changed or restored.",
       );
     return v;
   }
@@ -268,7 +276,7 @@ export class OperationEngine {
         name: v.name,
         scope: v.scope,
         before,
-        after: { ...(before ?? {}), value: v.values[mode]!, isSecret: false },
+        after: { ...(before ?? { isSecret: false }), value: v.values[mode]! },
       };
     });
     return this.savePlan(
@@ -295,7 +303,7 @@ export class OperationEngine {
   ) {
     if (
       !policy.deployment.redeployWhenUnchanged &&
-      changes.every((d) => digest(d.before) === digest(d.after))
+      changes.every((d) => variableDigest(d.before) === variableDigest(d.after))
     )
       throw new AppError(
         "NO_CHANGES",
@@ -430,7 +438,7 @@ export class OperationEngine {
         else vars[d.name] = structuredClone(d.after);
       }
       const valuesChanged = r.changes.some(
-        (d) => digest(d.before) !== digest(d.after),
+        (d) => variableDigest(d.before) !== variableDigest(d.after),
       );
       if (valuesChanged) {
         r.state = "writing";
@@ -447,9 +455,9 @@ export class OperationEngine {
       const saved = await this.gateway.get(r.target, r.releaseId);
       for (const d of r.changes)
         if (
-          digest(
+          variableDigest(
             this.variables(saved, r.environmentId, d.scope)[d.name] ?? null,
-          ) !== digest(d.after)
+          ) !== variableDigest(d.after)
         )
           throw new AppError(
             "VERIFY_FAILED",
@@ -549,10 +557,10 @@ export class OperationEngine {
           next === "succeeded" &&
           r.changes.some(
             (d) =>
-              digest(
+              variableDigest(
                 this.variables(release, r.environmentId, d.scope)[d.name] ??
                   null,
-              ) !== digest(d.after),
+              ) !== variableDigest(d.after),
           )
         ) {
           next = "uncertain";
@@ -630,9 +638,9 @@ export class OperationEngine {
         decision === "approved" &&
         r.changes.some(
           (d) =>
-            digest(
+            variableDigest(
               this.variables(release, r.environmentId, d.scope)[d.name] ?? null,
-            ) !== digest(d.after),
+            ) !== variableDigest(d.after),
         )
       )
         throw new AppError(
@@ -697,7 +705,7 @@ export class OperationEngine {
         this.variables(release, env.id, d.scope),
         d.name,
       );
-      if (digest(current) !== digest(d.after))
+      if (variableDigest(current) !== variableDigest(d.after))
         throw new AppError(
           "ROLLBACK_CONFLICT",
           "A changed variable no longer matches the value written by this operation.",

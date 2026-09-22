@@ -99,13 +99,13 @@ test("duplicate apply never writes/deploys twice", async () => {
   assert.equal(gateway.deploys, 1);
   await assert.rejects(engine.applyFromReview(p.id));
 });
-test("secret or unknown-secrecy variable cannot enter plan", async () => {
-  for (const value of [true, undefined]) {
+test("secret variables cannot enter plan", async () => {
+  for (const value of [true]) {
     const { engine, gateway } = await setup();
     gateway.release.variables["integration-enabled"]!.isSecret = value;
     await assert.rejects(
       engine.plan("integration-mode", "simulated"),
-      /non-secret/,
+      /Secret variables/,
     );
   }
 });
@@ -394,6 +394,152 @@ test("new MCP tools expose planning and status but no apply bypass", async () =>
   } finally {
     await client.close();
     await server.close();
+    await review.close();
+  }
+});
+
+for (const flag of [false, undefined]) {
+  for (const scope of ["release", "environment"] as const) {
+    test(`visible string with isSecret=${String(flag)} at ${scope} supports plan, apply and rollback`, async () => {
+      const { c, engine, gateway } = await setup();
+      const op = c.catalog.operations["integration-mode"]!;
+      op.variables = [{ ...op.variables[0]!, scope }];
+      c.hash = digest(c.catalog);
+      const vars =
+        scope === "release"
+          ? gateway.release.variables
+          : gateway.release.environments[0]!.variables;
+      vars["integration-enabled"] = {
+        value: "false",
+        ...(flag === undefined ? {} : { isSecret: flag }),
+      };
+      const original = structuredClone(vars["integration-enabled"]);
+      gateway.release.variables["untouched-secret"] = {
+        isSecret: true,
+        value: "SECRET_SENTINEL",
+      };
+      gateway.release.variables["untouched-normal"] = { value: "keep" };
+      const plan = await engine.plan("integration-mode", "simulated");
+      assert.deepEqual(plan.changes[0]!.before, original);
+      assert.ok(!JSON.stringify(plan).includes("SECRET_SENTINEL"));
+      await engine.applyFromReview(plan.id);
+      assert.equal((await engine.refresh(plan.id)).state, "succeeded");
+      const rollback = await engine.planRollback(plan.id);
+      assert.deepEqual(rollback.changes[0]!.after, original);
+      await engine.applyFromReview(rollback.id);
+      assert.equal((await engine.refresh(rollback.id)).state, "succeeded");
+      const restored =
+        scope === "release"
+          ? gateway.release.variables
+          : gateway.release.environments[0]!.variables;
+      assert.deepEqual(restored["integration-enabled"], original);
+      assert.deepEqual(gateway.release.variables["untouched-secret"], {
+        isSecret: true,
+        value: "SECRET_SENTINEL",
+      });
+      assert.deepEqual(gateway.release.variables["untouched-normal"], {
+        value: "keep",
+      });
+      assert.equal(gateway.deploys, 2);
+    });
+  }
+}
+for (const [label, variable] of [
+  ["secret string", { isSecret: true, value: "SECRET_SENTINEL" }],
+  ["secret placeholder", { isSecret: true, value: "***" }],
+  ["null value", { value: null }],
+  ["missing value", {}],
+  ["false flag null value", { isSecret: false, value: null }],
+  ["false flag missing value", { isSecret: false }],
+] as const) {
+  test(`${label} is refused by both planning and restoration without exposing values`, async () => {
+    const { engine, gateway, store } = await setup();
+    gateway.release.variables["integration-enabled"] = { ...variable };
+    const { toolResult } = await import("../src/tools/register.js");
+    const result = await toolResult(() =>
+      engine.plan("integration-mode", "simulated"),
+    );
+    assert.equal(result.isError, true);
+    assert.ok(JSON.stringify(result).includes("UNSUPPORTED_SECRET"));
+    assert.ok(!JSON.stringify(result).includes("SECRET_SENTINEL"));
+    assert.ok(!JSON.stringify(result).includes("***"));
+    assert.equal((await store.list()).length, 0);
+    gateway.release.variables["integration-enabled"] = { value: "false" };
+    const plan = await engine.plan("integration-mode", "simulated");
+    await engine.applyFromReview(plan.id);
+    await engine.refresh(plan.id);
+    gateway.release.variables["integration-enabled"] = { ...variable };
+    await assert.rejects(engine.planRollback(plan.id), {
+      code: "UNSUPPORTED_SECRET",
+    });
+    assert.ok(!JSON.stringify(await store.list()).includes("SECRET_SENTINEL"));
+  });
+}
+test("Azure omitting false flags after saving does not cause false conflicts in apply, tracking or rollback", async () => {
+  const { engine, gateway } = await setup();
+  const update = gateway.update.bind(gateway);
+  gateway.update = async (target, release) => {
+    await update(target, release);
+    for (const vars of [
+      gateway.release.variables,
+      ...gateway.release.environments.map((e) => e.variables),
+    ]) {
+      for (const v of Object.values(vars))
+        if (v.isSecret === false) delete v.isSecret;
+    }
+  };
+  const plan = await engine.plan("integration-mode", "simulated");
+  await engine.applyFromReview(plan.id);
+  assert.equal((await engine.refresh(plan.id)).state, "succeeded");
+  const rollback = await engine.planRollback(plan.id);
+  await engine.applyFromReview(rollback.id);
+  assert.equal((await engine.refresh(rollback.id)).state, "succeeded");
+  assert.equal(
+    gateway.release.variables["integration-enabled"]!.value,
+    "false",
+  );
+  assert.equal(gateway.deploys, 2);
+});
+test("normalization never hides true secrecy or actual value changes after review", async () => {
+  for (const change of [
+    { isSecret: true, value: "false" },
+    { value: null },
+    { value: "changed" },
+  ]) {
+    const { engine, gateway } = await setup();
+    gateway.release.variables["integration-enabled"] = { value: "false" };
+    const plan = await engine.plan("integration-mode", "simulated");
+    gateway.release.variables["integration-enabled"] = change;
+    assert.equal((await engine.applyFromReview(plan.id)).state, "conflict");
+    assert.equal(gateway.writes, 0);
+    assert.equal(gateway.deploys, 0);
+  }
+});
+test("review API and event logs include visible flagless diff but never unrelated secret values", async () => {
+  const { engine, gateway } = await setup();
+  gateway.release.variables["integration-enabled"] = { value: "false" };
+  gateway.release.variables["untouched-secret"] = {
+    isSecret: true,
+    value: "SECRET_SENTINEL",
+  };
+  const plan = await engine.plan("integration-mode", "simulated");
+  const review = await startReviewServer(engine);
+  try {
+    const token = new URLSearchParams(new URL(review.url()).hash.slice(1)).get(
+      "token",
+    )!;
+    const response = await fetch(review.origin + "/api/executions/" + plan.id, {
+      headers: { Authorization: "Bearer " + token },
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(text.includes("integration-enabled"));
+    assert.ok(!text.includes("SECRET_SENTINEL"));
+    await engine.applyFromReview(plan.id);
+    const finished = await engine.refresh(plan.id);
+    assert.ok(!JSON.stringify(finished.events).includes("SECRET_SENTINEL"));
+    assert.ok(!JSON.stringify(finished).includes("SECRET_SENTINEL"));
+  } finally {
     await review.close();
   }
 });

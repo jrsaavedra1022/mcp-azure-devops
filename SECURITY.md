@@ -2,7 +2,7 @@
 
 Reporta vulnerabilidades por el canal privado que configure el propietario del repositorio. No publiques tokens, snapshots reales, valores internos o enlaces de revisión en issues.
 
-Las lecturas originales ocultan valores por defecto. Las operaciones permiten solo variables explícitamente no secretas y almacenan su diff en un registro local cifrado. El PAT y las respuestas completas Azure no se devuelven al panel. Las escrituras y aprobaciones requieren habilitación de proceso y revisión local.
+Las lecturas originales ocultan valores por defecto. Las operaciones permiten variables con valor string visible y `isSecret: false` u omitido; bloquean siempre `isSecret: true` y valores ocultos o ausentes y almacenan su diff en un registro local cifrado. El PAT y las respuestas completas Azure no se devuelven al panel. Las escrituras y aprobaciones requieren habilitación de proceso y revisión local.
 
 El servidor HTTP escucha en 127.0.0.1 y usa sesión aleatoria, validación de Host/Origin, JSON, CSP y no-store. No está preparado para exponerse por túneles o a una red. El enlace con token concede acceso a la sesión local: protege sus logs y mensajes. La interfaz no aísla procesos hostiles del mismo usuario ni sustituye políticas Azure.
 
