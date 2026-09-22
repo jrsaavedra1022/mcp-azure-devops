@@ -1,0 +1,34 @@
+schemaVersion: "1"
+targets:
+  certification:
+    organization: example-org
+    project: Example Project
+    definitionId: 123
+    environment:
+      definitionEnvironmentId: 456
+      expectedName: Deploy Certification
+    selection:
+      strategy: latestSuccessfulDeployment
+operations:
+  integration-mode:
+    description: Cambiar el modo de integración y redesplegar certificación
+    target: certification
+    modes: [simulated, live]
+    variables:
+      - name: integration-enabled
+        scope: release
+        mustExist: true
+        values:
+          simulated: "true"
+          live: "false"
+      - name: integration-mode
+        scope: environment
+        mustExist: false
+        values:
+          simulated: "simulation"
+          live: "production-service"
+    deployment:
+      strategy: environmentRedeploy
+    approvals: external
+    planTtlMinutes: 15
+    trackingTimeoutMinutes: 1440

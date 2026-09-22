@@ -15,6 +15,43 @@ export class RestClient {
     private sleep: (ms: number) => Promise<void> = (ms) =>
       new Promise((r) => setTimeout(r, ms)),
   ) {}
+  async write(method: "PUT" | "PATCH", segments: string[], body: unknown) {
+    if (segments.some((s) => s === "." || s === ".."))
+      throw new AppError("INVALID_INPUT", "Invalid path segment.");
+    const url = new URL(
+      segments.map(encodeURIComponent).join("/"),
+      hosts.release + "/",
+    );
+    url.searchParams.set("api-version", "7.1");
+    let response: Response;
+    try {
+      response = await this.fetcher(url, {
+        method,
+        redirect: "error",
+        signal: AbortSignal.timeout(this.config.timeoutMs),
+        headers: {
+          Authorization: this.config.authorization,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      await response.body?.cancel();
+    } catch {
+      throw new AppError(
+        "WRITE_UNCERTAIN",
+        "Write response was not received. Inspect Azure before retrying.",
+      );
+    }
+    if (!response.ok)
+      throw new AppError(
+        "AZURE_HTTP_ERROR",
+        response.status === 403
+          ? "Access denied. Check resource permissions and token scopes."
+          : "Azure rejected the write; inspect resource state before retrying.",
+        response.status,
+      );
+  }
   async get(
     host: Host,
     segments: string[],

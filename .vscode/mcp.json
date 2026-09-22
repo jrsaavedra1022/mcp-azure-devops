@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "azure-devops-classic": {
+      "type": "stdio",
+      "command": "node",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--env-file=${workspaceFolder}/.env",
+        "${workspaceFolder}/dist/index.js"
+      ]
+    }
+  }
+}

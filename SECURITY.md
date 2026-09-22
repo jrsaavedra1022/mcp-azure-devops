@@ -1,5 +1,13 @@
 # Seguridad
 
-No incluyas tokens, dumps de definiciones reales ni valores de variables en issues, tests o logs. Reporta vulnerabilidades mediante el canal privado del repositorio una vez configurado por su propietario; no publiques detalles explotables ni credenciales en issues públicas.
+Reporta vulnerabilidades por el canal privado que configure el propietario del repositorio. No publiques tokens, snapshots reales, valores internos o enlaces de revisión en issues.
 
-Usa permisos mínimos, credenciales de corta duración y la allowlist de organizaciones. Los secretos se omiten en la salida; no se pueden recuperar mediante este servidor. Las escrituras están ausentes del transporte y de las herramientas. Consulta README para límites de autenticación y operación.
+Las lecturas originales ocultan valores por defecto. Las operaciones permiten solo variables explícitamente no secretas y almacenan su diff en un registro local cifrado. El PAT y las respuestas completas Azure no se devuelven al panel. Las escrituras y aprobaciones requieren habilitación de proceso y revisión local.
+
+El servidor HTTP escucha en 127.0.0.1 y usa sesión aleatoria, validación de Host/Origin, JSON, CSP y no-store. No está preparado para exponerse por túneles o a una red. El enlace con token concede acceso a la sesión local: protege sus logs y mensajes. La interfaz no aísla procesos hostiles del mismo usuario ni sustituye políticas Azure.
+
+El archivo de clave y los registros deben permanecer bajo permisos del usuario; en Windows verificar ACL. El cifrado no protege frente a acceso conjunto a clave y registros. No sincronizar el estado con Git o una carpeta compartida. No se realizan mutaciones automáticas al recuperar una operación interrumpida.
+
+Para certificados corporativos con Node 24, usa `--use-system-ca` y, si TI lo requiere, `NODE_EXTRA_CA_CERTS` con una CA PEM confiable en el entorno antes de iniciar Node. No deshabilites la validación TLS.
+
+Consulta docs/OPERATIONS.md para límites de concurrencia, scopes, restauración, retención y recuperación de bloqueos.

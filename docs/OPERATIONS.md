@@ -1,0 +1,137 @@
+# Operaciones recurrentes (0.2, preview)
+
+El servidor conserva sus siete tools de lectura. Con `AZDO_OPERATIONS_FILE` habilita seis tools adicionales de catálogo, planificación, historial y panel. Solo la interfaz local puede aplicar planes: no existe una tool MCP que escriba directamente o apruebe un plan. Esta separación evita llamadas accidentales desde el modelo; no constituye aislamiento frente a software malicioso con acceso al mismo usuario y al enlace de sesión.
+
+## Probar sin Azure
+
+```sh
+npm ci
+npm run check
+npm run demo
+```
+
+Abre la URL completa impresa. El ejemplo utiliza datos sintéticos y un adapter en memoria: revisar, aplicar, actualizar el progreso y preparar restauración funciona sin PAT. La demo completa el despliegue simulado inmediatamente; nunca ejecuta solicitudes Azure. El historial cifrado de esta demo se crea en el directorio temporal del sistema.
+
+## Configurar una organización real
+
+1. Copia `examples/operations.yaml` a `operations.local.yaml` (ignorado por Git).
+2. Ajusta organización, proyecto, definitionId y definitionEnvironmentId. `expectedName` debe coincidir exactamente con el stage.
+3. Define los nombres exactos y ámbitos de variables, y los modos permitidos con valores de tipo string.
+4. Valida con `npm run catalog:validate -- operations.local.yaml`.
+5. Configura `.env` con la credencial personal y:
+
+```dotenv
+AZDO_OPERATIONS_FILE=C:/absolute/path/mcp-azure-devops/operations.local.yaml
+AZDO_STATE_DIR=C:/Users/YOUR_USER/AppData/Local/azure-devops-classic-mcp/state
+AZDO_ENABLE_WRITES=false
+AZDO_ENABLE_APPROVALS=false
+```
+
+En macOS/Linux usa rutas absolutas del sistema. Sin `AZDO_STATE_DIR`, el estado se ubica en `.azure-devops-classic-mcp/state` dentro del perfil del usuario. Todos los procesos de producción del mismo usuario deben usar el mismo directorio; un segundo coordinador será rechazado. No uses distintos directorios para sortear el bloqueo.
+
+Con escrituras deshabilitadas puedes planificar y revisar. Antes de habilitar `AZDO_ENABLE_WRITES=true`, valida en una definición de prueba sin impacto, con un solo operador y los permisos mínimos. Reinicia el servidor al cambiar las variables de entorno. Cambiar YAML invalida planes anteriores automáticamente.
+
+## Uso con Copilot
+
+El repositorio incluye `.vscode/mcp.json`. Abre la carpeta raíz en VS Code y compila con `npm run build` antes de iniciar el servidor. La configuración compartida no contiene PAT:
+
+```json
+{
+  "servers": {
+    "azure-devops-classic": {
+      "type": "stdio",
+      "command": "node",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--env-file=${workspaceFolder}/.env",
+        "${workspaceFolder}/dist/index.js"
+      ]
+    }
+  }
+}
+```
+
+Ejemplo: «Lista las operaciones y prepara integration-mode con modo simulated. Muéstrame el enlace de revisión; no intentes ejecutar el cambio por otros medios».
+
+- `ado_list_operations`: catálogo y modos disponibles.
+- `ado_plan_operation`: `{ "operation": "integration-mode", "mode": "simulated" }`.
+- `ado_get_operation_status`: `{ "id": "UUID" }`.
+- `ado_list_operation_executions`: historial local.
+- `ado_open_operation_review`: enlace vigente, opcionalmente para un ID.
+- `ado_plan_operation_rollback`: prepara restauración para un ID original; aún exige revisión local.
+
+Las tools no devuelven valores de variables. El panel local sí muestra los valores no secretos del diff. El enlace contiene una capacidad de sesión en su fragmento; no se envía en los logs HTTP ni como Referer y debe tratarse como privado. Copilot recibe ese enlace y técnicamente otros procesos del mismo usuario pueden usarlo: esta revisión es una protección contra ejecución accidental, no prueba criptográfica de presencia humana.
+
+Inspector: `npx -y @modelcontextprotocol/inspector node --env-file=.env dist/index.js`. En Windows puede usarse `npx.cmd`. No ejecutes simultáneamente Inspector y Copilot contra el mismo estado. La demo sí es independiente y nunca accede a Azure.
+
+## Contrato YAML
+
+`schemaVersion` debe ser la cadena `"1"`. Todos los objetos de configuración rechazan propiedades desconocidas, claves YAML duplicadas y aliases. No hay interpolación, scripts, URLs de API arbitrarias ni expresiones ejecutables. Máximo: 256 KiB de catálogo, 50 variables por operación y 20 modos. Los valores son strings; usa `"true"` y `"false"`.
+
+Cada target especifica organización/proyecto, definición, stage de definición y nombre esperado. Cada operación referencia un target, lista modos y contiene el mapa completo de valores por variable. Una identidad de variable es su ámbito (`release` o `environment`) más nombre exacto. Diferencias de mayúsculas ambiguas fallan. `mustExist: false` permite agregar una variable no existente. La restauración puede eliminar únicamente la variable creada por esa operación, si su estado sigue coincidiendo.
+
+Selección:
+
+- `latestCreated`: último release activo por fecha de creación.
+- `latestSuccessfulDeployment`: busca el historial de despliegues exitosos del environment y elige un release activo. Examina hasta 20 páginas de 50 despliegues y falla si no puede resolverlo; no hace fallback a «último creado».
+- `explicit`: requiere `releaseId` y no acepta ese campo en otras estrategias.
+- `sourceBranch`: filtro opcional `refs/heads/...`; no se infiere Git Flow o trunk-based de nombres.
+
+Se fija el release seleccionado y el environment de su instancia en el plan. Crear otro release no cambia el objetivo ni el rollback. La demo ilustra la resolución. No se crean releases ni se cambian las versiones de sus artefactos.
+
+## Ejecución y protección de secretos
+
+Planificar lee Azure y guarda un diff no secreto y una huella de la instantánea. Al aplicar se verifica caducidad, catálogo, estado y huella. Se obtiene la instancia completa, se cambian solo las entradas seleccionadas y se envía por el endpoint oficial PUT de release. El resto del objeto se conserva, incluidos campos no modelados. Se lee nuevamente para comprobar los valores y detectar alteraciones inesperadas antes del PATCH de redeploy.
+
+Solo pueden modificarse variables cuyo `isSecret` sea explícitamente `false` y cuyo valor sea string. Si Azure omite ese indicador, la operación falla hasta revisar el caso; no se asume que es seguro. Los secretos existentes fuera del diff se conservan en la solicitud tal como Azure los devuelve; no se convierten en strings ni se incluyen en el registro. El comportamiento de preservación de secretos y grupos con la API de tu organización debe comprobarse en la prueba de integración antes de uso real. No se admite cambiar, revelar o restaurar secretos, ni modificar grupos de Library en esta versión.
+
+La verificación de la huella es conservadora: si Azure normaliza otros campos inesperadamente, se detiene antes del redeploy. PUT y PATCH no forman una transacción. Si cambia un dato entre el último GET y el PUT, la API puede no ofrecer un control condicional equivalente a ETag: hay una ventana residual de concurrencia externa. Este producto no promete aislamiento distribuido. Para producción con varios operadores hace falta un coordinador compartido y validar las garantías de la API; el bloqueo local no cubre otros equipos o la UI de Azure.
+
+## Redeploy y efectos posteriores
+
+Esta versión solo implementa `environmentRedeploy` para stages de Classic Releases. No ejecuta una task interna de forma aislada y no deshabilita tareas, gates o triggers. Si otro stage depende del destino mediante condiciones, existen environmentTriggers o aparecen condiciones desconocidas, el plan se rechaza. Esto puede bloquear las definiciones de tu empresa hasta revisar sus dependencias; nunca se eliminarán automáticamente.
+
+El control verifica la configuración incluida en la instancia. No puede detectar automatizaciones externas, service hooks o acciones de otros sistemas. El éxito representa el estado del despliegue en Azure; no prueba por sí solo la salud funcional de la aplicación. Health checks arbitrarios no están implementados.
+
+El seguimiento identifica el intento esperado y no confunde el éxito del intento anterior con el nuevo. Si aparece uno posterior, detiene el seguimiento con estado incierto. La correlación por release/environment/intento sigue necesitando que no haya solicitudes externas simultáneas; el comentario de la solicitud incluye el ID de operación para inspección.
+
+## Aprobaciones
+
+`approvals: external` es el valor recomendado inicialmente. Las aprobaciones se realizan en Azure; el panel muestra las pendientes y el enlace del release. `explicit` habilita botones de decisión únicamente cuando el proceso también tiene `AZDO_ENABLE_APPROVALS=true` y escrituras habilitadas.
+
+Cada decisión se revalida contra release, environment, intento y approvalId. Se requiere comentario. Azure decide elegibilidad, grupos, orden, restricciones sobre solicitantes y revalidación de identidad. El MCP no modifica aprobadores ni elimina controles. Si Azure exige autenticación interactiva o rechaza el PAT, aprueba en su interfaz.
+
+Permisos documentados por los endpoints:
+
+| Uso                                         | Scope API             |
+| ------------------------------------------- | --------------------- |
+| Leer releases y aprobaciones                | `vso.release`         |
+| Actualizar instancia y solicitar despliegue | `vso.release_execute` |
+| Aprobar/rechazar                            | `vso.release_manage`  |
+| Lectura de proyectos de las tools básicas   | `vso.project`         |
+
+Los scopes del PAT no sustituyen permisos del recurso y políticas de la organización. Las opciones del portal para PAT pueden agrupar permisos; revisa el alcance exacto antes de generar uno. Cada persona usa su credencial. No hay renovación automática ni credencial común embebida en YAML.
+
+## Estado, interrupciones y recuperación
+
+Estados principales: `planned → writing → variablesUpdated → requestingDeployment → tracking/awaitingApproval → succeeded/failed`. `conflict` impide aplicar un plan obsoleto. `uncertain`, `interrupted` y `trackingTimedOut` mantienen el bloqueo local del release hasta reconciliación explícita.
+
+Cerrar el navegador no cancela nada. Cerrar el servidor detiene el seguimiento, pero no una operación ya aceptada por Azure. Al reiniciar se retoma la lectura de operaciones en seguimiento. No se repiten escrituras interrumpidas o con respuesta incierta. El panel permite reconocer que el operador revisó el estado en Azure, sin realizar cambios remotos; después puede prepararse una restauración.
+
+Si aparece `STORE_LOCKED` después de un cierre abrupto: confirma primero que no existe otro servidor con ese directorio, respalda el estado y elimina únicamente el directorio vacío `coordinator.lock`. No borres la clave ni los registros. Reinicia y revisa las ejecuciones interrumpidas antes de liberar sus bloqueos. No hay desbloqueo automático por tiempo.
+
+Los registros usan AES-256-GCM con una clave local separada, escritura mediante archivo temporal y rename, permisos POSIX restrictivos cuando aplican. En Windows los permisos efectivos dependen de las ACL del perfil: restringe el directorio al usuario. El cifrado no protege de alguien que acceda a la clave y los registros. No guardar el estado en Git, carpetas compartidas o sincronizadas. La versión inicial no tiene limpieza automática; conserva el historial necesario para rollback y elimina registros terminales solo como mantenimiento offline, con backup si se necesita auditoría. No es un registro de auditoría inmutable.
+
+## Extender sin duplicar Microsoft
+
+`ReleaseGateway` encapsula Azure. `OperationEngine` coordina políticas y estados. `RecordStore` permite reemplazar persistencia. `review-server` maneja HTTP local y `tools/operations` expone planificación/lectura. El adapter de demo implementa la misma interfaz sin red.
+
+Para agregar una estrategia: ampliar el esquema con una unión discriminada, implementar su adapter, declarar efectos y añadir pruebas de rechazo, reanudación e idempotencia. No implementar fallback silencioso. Los scripts arbitrarios, secretos, Library, ejecución selectiva de tasks y coordinación distribuida requieren diseños separados. Para PRs, Boards y Test Plans, revisar primero el MCP oficial y preferir composición desde el cliente.
+
+## Referencias oficiales
+
+- [Releases List](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/list?view=azure-devops-rest-7.1)
+- [Deployments List](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/deployments/list?view=azure-devops-rest-7.1)
+- [Release Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/update-release?view=azure-devops-rest-7.1)
+- [Environment Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/update-release-environment?view=azure-devops-rest-7.1)
+- [Approvals Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/approvals/update?view=azure-devops-rest-7.1)

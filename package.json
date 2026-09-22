@@ -1,7 +1,7 @@
 {
   "name": "azure-devops-classic-mcp",
-  "version": "0.1.0",
-  "description": "Read-only Azure DevOps MCP server with Classic Releases support",
+  "version": "0.2.0",
+  "description": "Azure DevOps Classic Releases MCP with reviewed recurring operations",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -15,7 +15,9 @@
     "dist",
     "README.md",
     "LICENSE",
-    ".env.example"
+    ".env.example",
+    "docs",
+    "examples"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -27,11 +29,14 @@
     "check": "npm run typecheck && npm run lint && npm run test && npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "prepack": "npm run check"
+    "prepack": "npm run check",
+    "demo": "node --import tsx src/operations/demo.ts",
+    "catalog:validate": "node --import tsx src/operations/validate.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "yaml": "^2.8.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

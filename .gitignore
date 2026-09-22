@@ -7,3 +7,8 @@ coverage/
 *.log
 .DS_Store
 *.tgz
+operations.local.yaml
+*.local.yaml
+.azure-devops-classic-mcp/
+state/
+*.enc
