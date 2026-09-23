@@ -1,0 +1,61 @@
+{
+  "name": "azure-devops-classic-workbench",
+  "displayName": "Azure DevOps Classic Workbench",
+  "description": "Classic Release operations with reviewed changes, local history and MCP for Copilot.",
+  "version": "0.1.0",
+  "publisher": "local-classic-workbench",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.cjs",
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Trust is required for connections, credentials and operations."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "classicWorkbench.open",
+        "title": "Azure DevOps Classic: Open Workbench"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "classicWorkbench",
+          "title": "Classic Releases",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "classicWorkbench": [
+        {
+          "id": "classicWorkbench.launcher",
+          "name": "Workbench"
+        }
+      ]
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "classicWorkbench.mcp",
+        "label": "Azure DevOps Classic Workbench"
+      }
+    ]
+  },
+  "type": "module"
+}

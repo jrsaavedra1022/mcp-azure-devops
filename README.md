@@ -136,3 +136,12 @@ deployment:
 Ambas opciones son opt-in: por defecto son `reject` y `false`. Con `allow`, Azure puede disparar stages posteriores según su configuración; el panel muestra los dependientes directos y el seguimiento se limita al stage elegido. No se modifican dependencias ni se permiten triggers desconocidos. Con `redeployWhenUnchanged: true`, los valores iguales aparecen como «Sin cambios» y se puede solicitar redeploy sin ejecutar un PUT de variables.
 
 Consulta [`examples/operations.services.yaml`](examples/operations.services.yaml) para un catálogo genérico de dos servicios y [la guía de prueba con Copilot](docs/OPERATIONS.md#consultas-y-prueba-con-copilot). El panel indica si las escrituras están habilitadas y desactiva el botón cuando no lo están; el backend siempre vuelve a validar ese permiso.
+
+## Extensión de VS Code
+
+El proyecto incluye **Azure DevOps Classic Workbench**, con panel completo e integración MCP para Copilot. Los usuarios instalan el VSIX sin Node/npm ni compilación. Configura tokens mediante SecretStorage, importa tu YAML y revisa los cambios antes de aplicar.
+
+- [Instalación y uso](extension/README.md)
+- [Arquitectura, desarrollo y pruebas](docs/VSCODE_EXTENSION.md)
+
+Contribuidores: `npm run extension:package` genera `artifacts/azure-devops-classic-workbench.vsix`. Detén el servidor CLI/Inspector anterior antes de operar desde la extensión. No se publica automáticamente en Marketplace.

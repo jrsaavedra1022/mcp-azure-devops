@@ -137,9 +137,8 @@ export function digest(value: unknown): string {
     .update(JSON.stringify(stable(value)))
     .digest("hex");
 }
-export async function loadCatalog(path: string) {
+export function parseCatalog(text: string) {
   try {
-    const text = await readFile(path, "utf8");
     if (Buffer.byteLength(text) > 262144) throw new Error();
     const doc = parseDocument(text, { uniqueKeys: true });
     if (doc.errors.length) throw new Error();
@@ -149,6 +148,16 @@ export async function loadCatalog(path: string) {
     throw new AppError(
       "INVALID_CATALOG",
       "Invalid YAML catalog. Check schema, unique keys, targets and mode mappings; aliases are not supported.",
+    );
+  }
+}
+export async function loadCatalog(path: string) {
+  try {
+    return parseCatalog(await readFile(path, "utf8"));
+  } catch {
+    throw new AppError(
+      "INVALID_CATALOG",
+      "Invalid or unreadable YAML catalog. Check schema, targets and mode mappings.",
     );
   }
 }

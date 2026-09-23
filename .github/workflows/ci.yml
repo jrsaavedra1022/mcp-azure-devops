@@ -17,3 +17,23 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run format:check
+
+  extension:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run extension:package
+      - run: npm run extension:test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: classic-workbench-${{ matrix.os }}
+          path: artifacts/*.vsix

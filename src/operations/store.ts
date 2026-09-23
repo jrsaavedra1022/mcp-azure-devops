@@ -26,7 +26,10 @@ export class EncryptedStore<
 > implements RecordStore<T> {
   private key!: Buffer;
   private locked = false;
-  constructor(private directory: string) {}
+  constructor(
+    private directory: string,
+    private options: { allowIncompleteMigration?: boolean } = {},
+  ) {}
   async open() {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     try {
@@ -44,6 +47,17 @@ export class EncryptedStore<
       );
     }
     try {
+      if (!this.options.allowIncompleteMigration) {
+        try {
+          await readFile(join(this.directory, "migration.pending"));
+          throw new AppError(
+            "STATE_MIGRATION_INCOMPLETE",
+            "History import was interrupted. Resume the same import before connecting.",
+          );
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
+      }
       const path = join(this.directory, "key");
       try {
         await writeFile(path, randomBytes(32), { flag: "wx", mode: 0o600 });

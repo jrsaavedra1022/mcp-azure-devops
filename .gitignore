@@ -1,14 +1,48 @@
+# Dependencias, compilación y paquetes generados
 node_modules/
 dist/
 coverage/
+*.tsbuildinfo
+*.tgz
+*.vsix
+artifacts/
+.vscode-test/
+extension/LICENSE
+
+# Credenciales y configuración privada; conservar la plantilla genérica
 .env
 .env.*
 !.env.example
-*.log
-.DS_Store
-*.tgz
-operations.local.yaml
 *.local.yaml
+*.local.yml
+*.local.json
+*.local.jsonc
+/local/
+
+# Certificados y claves locales (incluidas CA corporativas)
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+
+# Estado del coordinador y archivos temporales cifrados
 .azure-devops-classic-mcp/
 state/
 *.enc
+*.enc.*.tmp
+coordinator.lock/
+migration.pending
+
+# Logs, archivos temporales y metadatos del sistema
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Paquetes locales de prueba (sin publicar)
+releases/preview/

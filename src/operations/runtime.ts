@@ -6,7 +6,8 @@ import { RestClient } from "../client/rest-client.js";
 import { loadCatalog } from "./catalog.js";
 import { AzureReleaseGateway } from "./gateway.js";
 import { EncryptedStore } from "./store.js";
-import { OperationEngine, type Execution } from "./engine.js";
+import type { Execution } from "./engine.js";
+import { createCoordinator } from "./coordinator.js";
 import { startReviewServer } from "./review-server.js";
 export async function startOperations(
   config: Config,
@@ -24,39 +25,21 @@ export async function startOperations(
   );
   await store.open();
   try {
-    const engine = new OperationEngine(
-      new AzureReleaseGateway(
+    const coordinator = await createCoordinator({
+      gateway: new AzureReleaseGateway(
         new RestClient(config, createLogger(config.logLevel)),
       ),
       store,
       catalog,
-      config.allowedOrganizations,
-      env.AZDO_ENABLE_WRITES === "true",
-      env.AZDO_ENABLE_APPROVALS === "true",
-    );
-    await engine.recover();
-    const review = await startReviewServer(engine);
-    let refreshing = false;
-    let current: Promise<void> | undefined;
-    const timer = setInterval(() => {
-      if (!refreshing) {
-        refreshing = true;
-        current = engine
-          .refreshAll()
-          .catch(() => {})
-          .finally(() => {
-            refreshing = false;
-          });
-      }
-    }, 5000);
-    timer.unref();
+      allowed: config.allowedOrganizations,
+      writes: env.AZDO_ENABLE_WRITES === "true",
+      approvalWrites: env.AZDO_ENABLE_APPROVALS === "true",
+      review: (engine) => startReviewServer(engine),
+    });
     return {
-      engine,
-      review,
+      ...coordinator,
       close: async () => {
-        clearInterval(timer);
-        await current;
-        await review.close();
+        await coordinator.close();
         await store.close();
       },
     };

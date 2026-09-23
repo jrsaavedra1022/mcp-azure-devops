@@ -31,19 +31,29 @@
     "dev": "tsx src/index.ts",
     "prepack": "npm run check",
     "demo": "node --import tsx src/operations/demo.ts",
-    "catalog:validate": "node --import tsx src/operations/validate.ts"
+    "catalog:validate": "node --import tsx src/operations/validate.ts",
+    "extension:build": "node scripts/build-extension.mjs",
+    "extension:package": "npm run extension:build && cd extension && vsce package --no-dependencies --allow-missing-repository --out ../artifacts/azure-devops-classic-workbench.vsix",
+    "extension:test": "node scripts/test-extension.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76",
-    "yaml": "^2.8.0"
+    "undici": "^6.28.1",
+    "yaml": "^2.8.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^22.0.0",
-    "typescript": "^5.9.0",
-    "tsx": "^4.20.0",
+    "@types/vscode": "^1.105.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
     "eslint": "^10.11.0",
-    "typescript-eslint": "^8.0.0",
-    "prettier": "^3.0.0"
+    "jsdom": "^27.0.1",
+    "prettier": "^3.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0"
   }
 }
