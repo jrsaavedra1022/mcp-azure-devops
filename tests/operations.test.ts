@@ -39,6 +39,8 @@ async function setup() {
     [],
     true,
     true,
+    Date.now,
+    async () => {},
   );
   return { engine, gateway, store, c };
 }
@@ -322,15 +324,15 @@ test("approval is bound to pending attempt, requires explicit policy and guards 
     engine.decideFromReview(p.id, 999, "approved", "Reviewed"),
     /no longer pending/,
   );
+  await engine.decideFromReview(p.id, 77, "approved", "Reviewed");
+  assert.equal(decisions, 1);
   gateway.release.variables["integration-enabled"]!.value = "third-party";
   await assert.rejects(
     engine.decideFromReview(p.id, 77, "approved", "Reviewed"),
     /Variables changed/,
   );
-  assert.equal(decisions, 0);
-  gateway.release.variables["integration-enabled"]!.value = "true";
-  await engine.decideFromReview(p.id, 77, "approved", "Reviewed");
   assert.equal(decisions, 1);
+  assert.equal((await engine.get(p.id)).state, "uncertain");
 });
 test("last successful selection follows deployments, skips abandoned releases and validates branch identity", async () => {
   const { AzureReleaseGateway, matchesBranch } =
@@ -626,7 +628,10 @@ for (const [label, actual] of [
     const p = await engine.plan("integration-mode", "simulated");
     const result = await engine.applyFromReview(p.id);
     assert.equal(result.state, "uncertain");
-    assert.equal(result.error!.code, "VERIFY_FAILED");
+    assert.equal(
+      result.error!.code,
+      label === "secret value" ? "UNSUPPORTED_SECRET" : "VERIFY_FAILED",
+    );
     assert.equal(gateway.deploys, 0);
     assert.ok(
       result.events.some(
@@ -662,7 +667,7 @@ test("creation accepts normalized metadata and restoration requires actual absen
   assert.equal(result.error!.code, "VERIFY_FAILED");
   assert.equal(gateway.deploys, 1);
 });
-test("metadata changes before write or outside the diff still conflict", async () => {
+test("pre-write metadata and post-write unrelated value changes still conflict", async () => {
   for (const phase of ["before", "after"]) {
     const { engine, gateway } = await setup();
     gateway.release.variables.unrelated = {
@@ -676,7 +681,7 @@ test("metadata changes before write or outside the diff still conflict", async (
       const update = gateway.update.bind(gateway);
       gateway.update = async (t, r) => {
         await update(t, r);
-        delete gateway.release.variables.unrelated!.allowOverride;
+        gateway.release.variables.unrelated!.value = "third-party";
       };
     }
     const result = await engine.applyFromReview(p.id);

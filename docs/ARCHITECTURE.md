@@ -35,3 +35,9 @@ El motor valida el allowlist antes de resolver. No ejecuta REST directamente y c
 `ReleaseQueryService` valida inputs y ámbito usando el mismo resolvedor de scope que `DevOpsService`. Las tools delegan sin HTTP propio a `AzureReleaseGateway`, que comparte `resolveDefinition`, `resolveTarget` y `select` con las operaciones. La proyección de `release-metadata.ts` elimina campos no autorizados en cada nivel y mantiene separados los snapshots operacionales crudos de las respuestas públicas.
 
 Las políticas downstream y redeploy sin cambios forman parte del catálogo y del plan persistido. No cambian la identidad, huella ni control de concurrencia. Registros antiguos sin estos campos se interpretan como reject/false. Los warnings son opcionales en registros históricos y se generan a partir del snapshot durante cada planificación/restauración. Las capacidades de escritura del panel se obtienen del proceso actual, nunca de un flag persistido o aportado por el navegador.
+
+## Verificación y tracking de operaciones
+
+`environment-policy.ts` clasifica condiciones y calcula relaciones de concurrencia. `post-update.ts` contiene las proyecciones estables e invariantes posteriores a PUT; no utiliza la huella global. `attempt-state.ts` interpreta el resultado del intento específico sin heredar el estado global del environment. `OperationEngine` conserva el fingerprint estricto antes de escribir, realiza verificación GET acotada, persiste intenciones de escritura y coordina recovery/rollback. `RestClient.write` nunca reintenta escrituras; el presupuesto de GET post-write se pasa por el gateway para evitar reintentos anidados.
+
+Los tests de `http-flow.test.ts` ejercitan el gateway y cliente REST reales con respuestas HTTP simuladas, además de las pruebas unitarias y de la API loopback. Los tests de arranque verifican códigos seguros en un proceso stdio real. No acceden a organizaciones, credenciales ni despliegues reales.

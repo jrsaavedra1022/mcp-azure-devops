@@ -14,6 +14,7 @@ export async function startReviewServer(
 ) {
   const token = randomBytes(32).toString("hex");
   let origin = "";
+  let closing = false;
   const tasks = new Set<Promise<unknown>>();
   const send = (res: ServerResponse, status: number, data: unknown) => {
     res.writeHead(status, { "Content-Type": "application/json" });
@@ -29,7 +30,11 @@ export async function startReviewServer(
     return JSON.parse(text || "{}") as unknown;
   };
   const server = createServer((req, res) => {
-    void (async () => {
+    if (closing) {
+      send(res, 503, { code: "SHUTTING_DOWN" });
+      return;
+    }
+    const task = (async () => {
       res.setHeader("Cache-Control", "no-store");
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Referrer-Policy", "no-referrer");
@@ -105,13 +110,7 @@ export async function startReviewServer(
         const data = await body(req);
         switch (match[2]) {
           case "apply": {
-            const task = engine.applyFromReview(id);
-            tasks.add(task);
-            try {
-              send(res, 200, await task);
-            } finally {
-              tasks.delete(task);
-            }
+            send(res, 200, await engine.applyFromReview(id));
             return;
           }
           case "cancel":
@@ -152,11 +151,20 @@ export async function startReviewServer(
         );
       }
     })();
+    tasks.add(task);
+    void task.finally(() => tasks.delete(task)).catch(() => {});
   });
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+    server.once("error", () =>
+      reject(
+        new AppError(
+          "REVIEW_SERVER_FAILED",
+          "Local review server could not start.",
+        ),
+      ),
+    );
     server.listen(0, "127.0.0.1", () => resolve());
   });
   const address = server.address();
@@ -167,6 +175,7 @@ export async function startReviewServer(
     url: (id?: string) => origin + "/#token=" + token + (id ? "&id=" + id : ""),
     origin,
     close: async () => {
+      closing = true;
       await Promise.allSettled([...tasks]);
       await new Promise<void>((resolve, reject) =>
         server.close((e) => (e ? reject(e) : resolve())),

@@ -1,6 +1,16 @@
 import {
+  validateEnvironmentPolicy,
+  findDirectDownstreamDependencies,
+} from "./environment-policy.js";
+import {
+  verifyPostUpdateInvariants,
+  expectedVariablesVisible,
+  executionEnvironment,
+  artifactIdentity,
+} from "./post-update.js";
+import { attemptOutcome } from "./attempt-state.js";
+import {
   normalizeVariables,
-  variableDigest,
   matchesExpectedVariable,
 } from "./variable-state.js";
 import { artifactMetadataSchema } from "../services/release-metadata.js";
@@ -32,6 +42,7 @@ export type State =
   | "cancelled"
   | "writing"
   | "variablesUpdated"
+  | "requestingApproval"
   | "requestingDeployment"
   | "tracking"
   | "awaitingApproval"
@@ -70,6 +81,12 @@ export interface Execution {
   approvals: Approval[];
   rollbackOf?: string;
   deploymentRequestedAt?: string;
+  observedAttempt?: number;
+  observedDeploymentId?: number;
+  observedAttemptId?: number;
+  decidedApprovalIds?: number[];
+  lastMutation?: "variables" | "deployment" | "approval";
+  observabilityError?: ReturnType<typeof safeError>;
 }
 const terminal = new Set<State>([
   "succeeded",
@@ -84,6 +101,7 @@ const active = new Set<State>([
   "writing",
   "variablesUpdated",
   "requestingDeployment",
+  "requestingApproval",
   "tracking",
   "awaitingApproval",
   "uncertain",
@@ -100,6 +118,8 @@ export class OperationEngine {
     private writes: boolean,
     private approvalWrites: boolean,
     private now: () => number = Date.now,
+    private sleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
   async listOperations() {
     const { catalog } = await this.catalog();
@@ -113,9 +133,12 @@ export class OperationEngine {
   async recover() {
     for (const r of await this.store.list())
       if (
-        ["writing", "variablesUpdated", "requestingDeployment"].includes(
-          r.state,
-        )
+        [
+          "writing",
+          "variablesUpdated",
+          "requestingDeployment",
+          "requestingApproval",
+        ].includes(r.state)
       ) {
         r.state = "interrupted";
         this.event(
@@ -128,7 +151,12 @@ export class OperationEngine {
   private event(r: Execution, message: string) {
     r.events.push({ at: new Date(this.now()).toISOString(), message });
   }
-  private guard(t: Target, r: Release, policy: Operation): Environment {
+  private guard(
+    t: Target,
+    r: Release,
+    policy: Operation,
+    changesGlobal = false,
+  ): Environment {
     if (this.allowed.length && !this.allowed.includes(t.organization))
       throw new AppError("FORBIDDEN_SCOPE", "Organization outside allowlist.");
     if (r.releaseDefinition.id !== t.definitionId || r.status !== "active")
@@ -148,45 +176,7 @@ export class OperationEngine {
         "INVALID_TARGET",
         "Artifact branch does not match configured branch.",
       );
-    if (
-      r.environments.some((e) =>
-        ["inProgress", "queued", "scheduled"].includes(e.status),
-      )
-    )
-      throw new AppError(
-        "DEPLOYMENT_BUSY",
-        "A deployment is active, queued or scheduled in this release.",
-      );
-    // Only known downstream dependencies are policy-controlled; unknown triggers always fail closed.
-    for (const other of r.environments) {
-      if (other.environmentTriggers.length)
-        throw new AppError(
-          "UNVERIFIED_TRIGGERS",
-          "Environment triggers require manual review; automatic operation refused.",
-        );
-      if (
-        other.conditions.some(
-          (c) => !["event", "environmentState"].includes(c.conditionType),
-        )
-      )
-        throw new AppError(
-          "UNVERIFIED_TRIGGERS",
-          "Unknown stage condition type.",
-        );
-      if (
-        policy.deployment.downstreamPolicy !== "allow" &&
-        other.id !== env.id &&
-        other.conditions.some(
-          (c) =>
-            c.conditionType === "environmentState" &&
-            c.name.toLowerCase() === env.name.toLowerCase(),
-        )
-      )
-        throw new AppError(
-          "DOWNSTREAM_TRIGGER",
-          "Another stage depends on the selected environment; isolated redeploy cannot be guaranteed.",
-        );
-    }
+    validateEnvironmentPolicy(r, env, policy, changesGlobal);
     return env;
   }
   reviewCapabilities() {
@@ -196,17 +186,10 @@ export class OperationEngine {
     };
   }
   private downstreamWarnings(release: Release, env: Environment) {
-    const stages = release.environments
-      .filter(
-        (other) =>
-          other.id !== env.id &&
-          other.conditions.some(
-            (c) =>
-              c.conditionType === "environmentState" &&
-              c.name.toLowerCase() === env.name.toLowerCase(),
-          ),
-      )
-      .map((e) => ({ id: e.id, name: e.name }));
+    const stages = findDirectDownstreamDependencies(release, env).map((e) => ({
+      id: e.id,
+      name: e.name,
+    }));
     return stages.length
       ? [
           {
@@ -307,12 +290,21 @@ export class OperationEngine {
   ) {
     if (
       !policy.deployment.redeployWhenUnchanged &&
-      changes.every((d) => variableDigest(d.before) === variableDigest(d.after))
+      changes.every((d) => matchesExpectedVariable(d.before, d.after))
     )
       throw new AppError(
         "NO_CHANGES",
         "Values already match; no deployment requested.",
       );
+    validateEnvironmentPolicy(
+      release,
+      env,
+      policy,
+      changes.some(
+        (d) =>
+          d.scope === "release" && !matchesExpectedVariable(d.before, d.after),
+      ),
+    );
     const r: Execution = {
       id: randomUUID(),
       operation,
@@ -375,9 +367,16 @@ export class OperationEngine {
     ].join("/");
     if (this.busy.has(resource))
       throw new AppError("BUSY", "Operation is executing.");
-    r.state = "cancelled";
-    this.event(r, "Plan cancelled; no changes made.");
-    await this.store.put(r);
+    this.busy.add(resource);
+    try {
+      if ((await this.store.get(id)).state !== "planned")
+        throw new AppError("INVALID_STATE", "Plan no longer pending.");
+      r.state = "cancelled";
+      this.event(r, "Plan cancelled; no changes made.");
+      await this.store.put(r);
+    } finally {
+      this.busy.delete(resource);
+    }
   }
   // Called only by the authenticated loopback review controller. No MCP apply bypass.
   async applyFromReview(id: string) {
@@ -430,58 +429,49 @@ export class OperationEngine {
           "An unresolved execution owns this release. Inspect or recover it first.",
         );
       const current = await this.gateway.get(r.target, r.releaseId);
-      this.guard(r.target, current, r.policy);
+      this.guard(
+        r.target,
+        current,
+        r.policy,
+        r.changes.some(
+          (d) =>
+            d.scope === "release" &&
+            !matchesExpectedVariable(d.before, d.after),
+        ),
+      );
+      executionEnvironment(current, r);
       if (this.fingerprint(current) !== r.fingerprint)
         throw new AppError(
           "CONFLICT",
           "Release changed since review. Prepare a new plan.",
         );
+      const before = structuredClone(current);
       for (const d of r.changes) {
         const vars = this.variables(current, r.environmentId, d.scope);
         if (d.after === null) delete vars[d.name];
         else vars[d.name] = structuredClone(d.after);
       }
       const valuesChanged = r.changes.some(
-        (d) => variableDigest(d.before) !== variableDigest(d.after),
+        (d) => !matchesExpectedVariable(d.before, d.after),
       );
       if (valuesChanged) {
         r.state = "writing";
+        r.lastMutation = "variables";
         this.event(r, "Local review accepted; saving variables.");
         await this.store.put(r);
         mutation = true;
         await this.gateway.update(r.target, current);
+        this.event(r, "Variable update request accepted.");
+        await this.store.put(r);
       } else {
         this.event(
           r,
           "Values unchanged; local review accepted for redeploy only. No variable update required.",
         );
       }
-      const saved = await this.gateway.get(r.target, r.releaseId);
-      for (const d of r.changes)
-        if (
-          !matchesExpectedVariable(
-            this.variables(saved, r.environmentId, d.scope)[d.name],
-            d.after,
-          )
-        )
-          throw new AppError(
-            "VERIFY_FAILED",
-            `Saved variable "${d.name}" differs from the requested value. Redeploy was not requested.`,
-          );
-      // Only after our PUT and successful semantic verification may Azure normalize
-      // metadata on variables in the diff. All other fields still match exactly.
-      const comparable = structuredClone(saved);
-      if (valuesChanged) {
-        for (const d of r.changes) {
-          const vars = this.variables(comparable, r.environmentId, d.scope);
-          if (d.after !== null) vars[d.name] = structuredClone(d.after);
-        }
-      }
-      if (this.fingerprint(comparable) !== this.fingerprint(current))
-        throw new AppError(
-          "VERIFY_FAILED",
-          "Other release fields changed while saving. Redeploy was not requested.",
-        );
+      if (valuesChanged) await this.verifyReadAfterWrite(before, r);
+      // No PUT: the strict pre-write snapshot is already the current checked state.
+      else verifyPostUpdateInvariants(before, current, r);
       r.state = "variablesUpdated";
       this.event(
         r,
@@ -490,9 +480,9 @@ export class OperationEngine {
           : "Unchanged variables verified before redeploy.",
       );
       await this.store.put(r);
-      this.guard(r.target, saved, r.policy);
       this.event(r, "Post-update validation passed.");
       r.state = "requestingDeployment";
+      r.lastMutation = "deployment";
       r.deploymentRequestedAt = new Date(this.now()).toISOString();
       r.deadline = new Date(
         this.now() + r.policy.trackingTimeoutMinutes * 60000,
@@ -515,7 +505,10 @@ export class OperationEngine {
     } catch (e) {
       r.state = mutation ? "uncertain" : "conflict";
       r.error = safeError(e);
-      if (e instanceof AppError && e.code === "VERIFY_FAILED")
+      if (
+        e instanceof AppError &&
+        ["VERIFY_FAILED", "UNSUPPORTED_SECRET"].includes(e.code)
+      )
         this.event(
           r,
           "Variable update could not be verified; redeploy was not requested.",
@@ -532,6 +525,51 @@ export class OperationEngine {
     }
     return r;
   }
+  private async verifyReadAfterWrite(before: Release, r: Execution) {
+    const deadline = performance.now() + 5000;
+    for (
+      let attempt = 0;
+      attempt < 5 && performance.now() < deadline;
+      attempt++
+    ) {
+      try {
+        const saved = await this.gateway.get(r.target, r.releaseId, {
+          timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())),
+          maxRetries: 0,
+        });
+        verifyPostUpdateInvariants(before, saved, r, false);
+        if (expectedVariablesVisible(saved, r)) return;
+        const env = executionEnvironment(saved, r);
+        if (
+          r.changes.some(
+            (d) =>
+              (d.scope === "release" ? saved.variables : env.variables)[d.name]
+                ?.isSecret === true,
+          )
+        )
+          throw new AppError(
+            "UNSUPPORTED_SECRET",
+            "A reviewed variable is now secret; redeploy was not requested.",
+          );
+      } catch (e) {
+        if (
+          !(e instanceof AppError) ||
+          !(
+            e.code === "TRANSPORT_ERROR" ||
+            e.status === 429 ||
+            (e.status !== undefined && e.status >= 500)
+          )
+        )
+          throw e;
+      }
+      if (attempt < 4 && performance.now() < deadline)
+        await this.sleep(Math.min(750, deadline - performance.now()));
+    }
+    throw new AppError(
+      "VERIFY_FAILED",
+      "Requested values or variable absence were not visible within bounded verification; redeploy was not requested.",
+    );
+  }
   async refresh(id: string) {
     const r = await this.store.get(id);
     if (!["tracking", "awaitingApproval"].includes(r.state)) return r;
@@ -543,65 +581,125 @@ export class OperationEngine {
     if (this.busy.has(resource)) return r;
     this.busy.add(resource);
     try {
-      const release = await this.gateway.get(r.target, r.releaseId),
-        env = release.environments.find((e) => e.id === r.environmentId);
-      if (!env)
-        throw new AppError("NOT_FOUND", "Environment no longer available.");
+      const release = await this.gateway.get(r.target, r.releaseId);
+      const env = executionEnvironment(release, r);
+      if (
+        digest(artifactIdentity(release.artifacts)) !==
+        digest(artifactIdentity(r.artifacts))
+      )
+        throw new AppError(
+          "POST_UPDATE_ARTIFACT_CHANGED",
+          "Artifact identity changed during tracking; inspect Azure.",
+        );
       const latest = Math.max(0, ...env.deploySteps.map((s) => s.attempt));
-      if (latest > r.expectedAttempt) {
+      const attempts = env.deploySteps.filter(
+        (s) => s.attempt === r.expectedAttempt,
+      );
+      const attempt = attempts[0];
+      if (
+        latest > r.expectedAttempt ||
+        attempts.length > 1 ||
+        (attempt?.deploymentId !== undefined &&
+          r.observedDeploymentId !== undefined &&
+          attempt.deploymentId !== r.observedDeploymentId) ||
+        (attempt?.id !== undefined &&
+          r.observedAttemptId !== undefined &&
+          attempt.id !== r.observedAttemptId)
+      ) {
         r.state = "uncertain";
-        this.event(r, "A newer deployment attempt exists. Inspect Azure.");
+        r.error = safeError(
+          new AppError(
+            "STALE_ATTEMPT",
+            "Deployment attempt changed or is ambiguous; inspect Azure.",
+          ),
+        );
+        this.event(
+          r,
+          "A newer or ambiguous deployment attempt exists. Inspect Azure.",
+        );
       } else {
-        r.approvals = await this.gateway.approvals(
-          r.target,
-          r.releaseId,
-          r.environmentId,
-          r.expectedAttempt,
-        );
-        const attempt = env.deploySteps.find(
-          (s) => s.attempt === r.expectedAttempt,
-        );
-        let next: State = r.approvals.length ? "awaitingApproval" : "tracking";
-        if (
-          attempt &&
-          [
-            "succeeded",
-            "rejected",
-            "canceled",
-            "partiallySucceeded",
-            "failed",
-          ].includes(env.status)
-        )
-          next = env.status === "succeeded" ? "succeeded" : "failed";
-        if (
-          next === "succeeded" &&
-          r.changes.some(
-            (d) =>
-              !matchesExpectedVariable(
-                this.variables(release, r.environmentId, d.scope)[d.name],
-                d.after,
-              ),
-          )
-        ) {
-          next = "uncertain";
-          this.event(
-            r,
-            "Variables changed during deployment; inspect the resulting configuration.",
+        try {
+          r.approvals = await this.gateway.approvals(
+            r.target,
+            r.releaseId,
+            r.environmentId,
+            r.expectedAttempt,
           );
+          r.approvals = r.approvals.filter(
+            (a) => !r.decidedApprovalIds?.includes(a.id),
+          );
+          delete r.observabilityError;
+        } catch (e) {
+          r.approvals = [];
+          r.observabilityError = safeError(e);
+          if (
+            !r.events.some(
+              (e) =>
+                e.message ===
+                "Approval visibility unavailable; continuing deployment tracking.",
+            )
+          )
+            this.event(
+              r,
+              "Approval visibility unavailable; continuing deployment tracking.",
+            );
         }
-        if (Date.parse(r.deadline) < this.now() && !terminal.has(next))
+        let next: State = r.approvals.length ? "awaitingApproval" : "tracking";
+        if (attempt) {
+          if (r.observedAttempt === undefined)
+            this.event(r, `Deployment attempt detected: ${attempt.attempt}.`);
+          r.observedAttempt = attempt.attempt;
+          if (attempt.deploymentId !== undefined)
+            r.observedDeploymentId = attempt.deploymentId;
+          if (attempt.id !== undefined) r.observedAttemptId = attempt.id;
+          const outcome = attemptOutcome(attempt);
+          if (outcome !== "tracking") next = outcome;
+          if (!expectedVariablesVisible(release, r)) {
+            next = "uncertain";
+            r.error = safeError(
+              new AppError(
+                "CONFLICT",
+                "Variables changed during deployment; inspect the resulting configuration.",
+              ),
+            );
+          }
+        }
+        if (Date.parse(r.deadline) < this.now() && !terminal.has(next)) {
           next = "trackingTimedOut";
+          r.error = safeError(
+            new AppError(
+              r.observedAttempt === undefined
+                ? "DEPLOYMENT_NOT_OBSERVED"
+                : "TRACKING_TIMEOUT",
+              "Deployment observation timed out. Reconcile in Azure before another mutation.",
+            ),
+          );
+        } else if (next !== "uncertain") delete r.error;
         if (next !== r.state) {
           r.state = next;
           this.event(r, `Deployment state: ${next}`);
         }
       }
-      delete r.error;
       await this.store.put(r);
     } catch (e) {
       r.error = safeError(e);
-      if (Date.parse(r.deadline) < this.now()) {
+      if (
+        e instanceof AppError &&
+        ["POST_UPDATE_TARGET_CHANGED", "POST_UPDATE_ARTIFACT_CHANGED"].includes(
+          e.code,
+        )
+      )
+        r.state = "uncertain";
+      else if (Date.parse(r.deadline) < this.now()) {
         r.state = "trackingTimedOut";
+        r.error = safeError(
+          new AppError(
+            r.observedAttempt === undefined
+              ? "DEPLOYMENT_NOT_OBSERVED"
+              : "TRACKING_TIMEOUT",
+            "Tracking timed out while Azure could not be queried.",
+          ),
+        );
         this.event(r, "Tracking timed out while Azure could not be queried.");
       }
       await this.store.put(r);
@@ -627,6 +725,11 @@ export class OperationEngine {
         "Enable reviewed approval decisions explicitly in server configuration.",
       );
     const r = await this.refresh(id);
+    if (r.state === "uncertain" && r.error?.code === "CONFLICT")
+      throw new AppError(
+        "CONFLICT",
+        "Variables changed before approval. Inspect Azure.",
+      );
     if (
       r.policy.approvals !== "explicit" ||
       r.state !== "awaitingApproval" ||
@@ -646,8 +749,17 @@ export class OperationEngine {
       throw new AppError("BUSY", "Another action is in progress.");
     this.busy.add(resource);
     try {
+      const persisted = await this.store.get(id);
+      if (
+        persisted.state !== "awaitingApproval" ||
+        persisted.decidedApprovalIds?.includes(approvalId)
+      )
+        throw new AppError(
+          "STALE_APPROVAL",
+          "Approval is no longer pending for this attempt.",
+        );
       const release = await this.gateway.get(r.target, r.releaseId);
-      const env = release.environments.find((e) => e.id === r.environmentId);
+      const env = executionEnvironment(release, r);
       if (
         !env ||
         Math.max(0, ...env.deploySteps.map((s) => s.attempt)) >
@@ -680,7 +792,13 @@ export class OperationEngine {
           "Approval is no longer pending for this attempt.",
         );
       try {
+        r.lastMutation = "approval";
+        r.state = "requestingApproval";
+        this.event(r, "Requesting reviewed approval decision.");
+        await this.store.put(r);
         await this.gateway.decide(r.target, approvalId, decision, comment);
+        r.state = "tracking";
+        r.decidedApprovalIds = [...(r.decidedApprovalIds ?? []), approvalId];
         this.event(r, `Approval ${approvalId}: ${decision}.`);
         r.approvals = r.approvals.filter((a) => a.id !== approvalId);
       } catch (e) {
@@ -700,15 +818,7 @@ export class OperationEngine {
 
   async planRollback(id: string) {
     const previous = await this.store.get(id);
-    if (
-      ![
-        "succeeded",
-        "failed",
-        "uncertain",
-        "interrupted",
-        "trackingTimedOut",
-      ].includes(previous.state)
-    )
+    if (!["succeeded", "failed"].includes(previous.state))
       throw new AppError(
         "INVALID_STATE",
         "Wait for execution completion before preparing restoration.",
@@ -721,6 +831,15 @@ export class OperationEngine {
       );
     const release = await this.gateway.get(previous.target, previous.releaseId),
       env = this.guard(previous.target, release, previous.policy);
+    executionEnvironment(release, previous);
+    if (
+      digest(artifactIdentity(release.artifacts)) !==
+      digest(artifactIdentity(previous.artifacts))
+    )
+      throw new AppError(
+        "ROLLBACK_CONFLICT",
+        "Artifact identity changed since the operation. Restoration cannot reuse that deployment target.",
+      );
     const changes = previous.changes.map((d) => {
       const current = this.readVariable(
         this.variables(release, env.id, d.scope),
@@ -750,11 +869,30 @@ export class OperationEngine {
     const r = await this.store.get(id);
     if (!["uncertain", "interrupted", "trackingTimedOut"].includes(r.state))
       throw new AppError("INVALID_STATE", "No recovery acknowledgment needed.");
-    r.state = "failed";
-    this.event(
-      r,
-      "Operator acknowledged reconciliation in Azure. No Azure mutation or cancellation performed.",
-    );
-    await this.store.put(r);
+    const resource = [
+      r.target.organization,
+      r.target.project,
+      r.releaseId,
+    ].join("/");
+    if (this.busy.has(resource))
+      throw new AppError("BUSY", "Another action is in progress.");
+    this.busy.add(resource);
+    try {
+      if (
+        !["uncertain", "interrupted", "trackingTimedOut"].includes(
+          (await this.store.get(id)).state,
+        )
+      )
+        throw new AppError("INVALID_STATE", "Recovery already acknowledged.");
+      // This is an operator attestation, not a claim that a GET can prove reconciliation.
+      r.state = "failed";
+      this.event(
+        r,
+        "Operator acknowledged reconciliation in Azure. No Azure mutation or cancellation performed.",
+      );
+      await this.store.put(r);
+    } finally {
+      this.busy.delete(resource);
+    }
   }
 }

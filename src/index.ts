@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { startOperations } from "./operations/runtime.js";
+import { startupCode } from "./errors.js";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logging.js";
 import { createServer } from "./server.js";
@@ -26,8 +27,8 @@ try {
         .then(close)
         .finally(() => process.exit(0));
     });
-} catch {
-  await operations?.close();
-  createLogger("error")("startup_failed");
+} catch (error) {
+  await operations?.close().catch(() => {});
+  createLogger("error")("startup_failed", undefined, startupCode(error));
   process.exitCode = 1;
 }

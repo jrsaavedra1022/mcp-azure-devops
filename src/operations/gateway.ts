@@ -24,6 +24,8 @@ const condition = z
 const step = z
   .object({
     attempt: z.number(),
+    operationStatus: z.string().optional(),
+    id: z.number().optional(),
     status: z.string().optional(),
     deploymentId: z.number().optional(),
   })
@@ -83,7 +85,11 @@ export type ReleaseSelection = ReleaseScope & {
 export interface ReleaseGateway {
   resolveTarget(t: CatalogTarget): Promise<Target>;
   select(t: Target): Promise<Release>;
-  get(t: Target, id: number): Promise<Release>;
+  get(
+    t: Target,
+    id: number,
+    options?: { timeoutMs?: number; maxRetries?: number },
+  ): Promise<Release>;
   update(t: Target, release: Release): Promise<void>;
   deploy(t: Target, id: number, env: number, comment: string): Promise<void>;
   approvals(
@@ -201,10 +207,19 @@ export class AzureReleaseGateway implements ReleaseGateway {
     }
     return resolveEnvironmentTarget(t, definition);
   }
-  private async releaseData(t: ReleaseScope, id: number) {
+  private async releaseData(
+    t: ReleaseScope,
+    id: number,
+    options?: { timeoutMs?: number; maxRetries?: number },
+  ) {
     try {
       return (
-        await this.client.get("release", this.path(t, "releases", String(id)))
+        await this.client.get(
+          "release",
+          this.path(t, "releases", String(id)),
+          {},
+          options,
+        )
       ).data;
     } catch (e) {
       if (e instanceof AppError && e.status === 404)
@@ -212,8 +227,12 @@ export class AzureReleaseGateway implements ReleaseGateway {
       throw e;
     }
   }
-  async get(t: ReleaseScope, id: number) {
-    return releaseSchema.parse(await this.releaseData(t, id));
+  async get(
+    t: ReleaseScope,
+    id: number,
+    options?: { timeoutMs?: number; maxRetries?: number },
+  ) {
+    return releaseSchema.parse(await this.releaseData(t, id, options));
   }
   async getMetadata(t: ReleaseScope, id: number) {
     return safeReleaseMetadata(await this.releaseData(t, id));

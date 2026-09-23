@@ -85,7 +85,7 @@ Planificar lee Azure y guarda un diff no secreto y una huella de la instantánea
 
 Una variable es modificable si tiene un valor string visible y `isSecret` no es `true`: `isSecret: false` y el indicador omitido se aceptan. `isSecret: true` siempre se bloquea, incluso si Azure devuelve un string o un placeholder. Los valores ocultos, `null` o ausentes no son modificables. La misma validación se usa al preparar cambios y restauraciones. Los secretos existentes fuera del diff se conservan en la solicitud tal como Azure los devuelve; no se convierten en strings ni se incluyen en el registro. El comportamiento de preservación de secretos y grupos con la API de tu organización debe comprobarse en la prueba de integración antes de uso real. No se admite cambiar, revelar o restaurar secretos, ni modificar grupos de Library en esta versión.
 
-La verificación de la huella es conservadora: si Azure normaliza otros campos inesperadamente, se detiene antes del redeploy. PUT y PATCH no forman una transacción. Si cambia un dato entre el último GET y el PUT, la API puede no ofrecer un control condicional equivalente a ETag: hay una ventana residual de concurrencia externa. Este producto no promete aislamiento distribuido. Para producción con varios operadores hace falta un coordinador compartido y validar las garantías de la API; el bloqueo local no cubre otros equipos o la UI de Azure.
+La huella se compara estrictamente antes de escribir. Después de nuestro PUT se comparan invariantes semánticas, no el objeto Release completo; revision, timestamps y metadata server-managed pueden normalizarse. PUT y PATCH no forman una transacción. Si cambia un dato entre el último GET y el PUT, la API puede no ofrecer un control condicional equivalente a ETag: hay una ventana residual de concurrencia externa. Este producto no promete aislamiento distribuido. Para producción con varios operadores hace falta un coordinador compartido y validar las garantías de la API; el bloqueo local no cubre otros equipos o la UI de Azure.
 
 ## Redeploy y efectos posteriores
 
@@ -187,7 +187,7 @@ Abre el `reviewUrl` y verifica el release y stage concretos resueltos. El catál
 
 `deployment.downstreamPolicy` admite `reject` (predeterminado, comportamiento anterior) y `allow`. `allow` permite únicamente la dependencia conocida `environmentState` de otro stage hacia el seleccionado. El plan y el panel muestran `DOWNSTREAM_DEPENDENCY`, los IDs y nombres de los dependientes directos y la posibilidad de ejecuciones posteriores decididas por Azure. También se devuelven en las tools de planificación y estado. No implica que esos stages necesariamente vayan a ejecutarse ni que estén aislados; pueden existir dependencias transitivas. No se alteran condiciones, aprobadores, tareas ni triggers.
 
-Se siguen rechazando triggers de environment, tipos de condición desconocidos, despliegues activos/queued/scheduled, releases inactivos o incorrectos, stages con identidad distinta y organizaciones fuera del allowlist. Las comprobaciones se repiten antes de escribir y antes del redeploy. Un cambio de dependencias tras la revisión invalida la huella del plan.
+Se siguen rechazando triggers de environment no soportados, condiciones desconocidas, releases inactivos o incorrectos, stages con identidad distinta y organizaciones fuera del allowlist. Los despliegues activos/queued/scheduled bloquean si afectan al stage seleccionado o su componente de dependencias. Si el diff cambia variables globales, también bloquean los stages independientes activos porque comparten ese alcance. Las comprobaciones se repiten antes de escribir y antes del redeploy. Un cambio de dependencias tras la revisión invalida la huella del plan.
 
 `deployment.redeployWhenUnchanged` es `false` por defecto y mantiene `NO_CHANGES` si todos los valores coinciden. Con `true`, puede prepararse y ejecutarse el plan: se omite la actualización de variables si todo está igual, se verifica otra vez el release y se solicita redeploy. Los resultados inciertos no se reintentan automáticamente. La restauración de una operación de este tipo puede volver a desplegar esos mismos valores. El rollback conserva la política original y presenta de nuevo las advertencias.
 
@@ -247,6 +247,79 @@ Después del PUT, `matchesExpectedVariable` comprueba existencia, valor string e
 
 La misma comparación se usa al seguir el despliegue, verificar variables antes de aprobar y preparar/verificar una restauración. Un cambio real de valor o a secreto sigue bloqueando la acción o marcando la ejecución como incierta.
 
-La huella pre-write permanece intacta, incluida la metadata: los cambios entre revisión y aplicación siguen invalidando el plan. Solo después de nuestro PUT y de verificar semánticamente las variables del diff se excluye su metadata de la comparación del snapshot posterior. Todas las variables ajenas al diff, identidad, configuración y dependencias siguen verificándose como antes. Un redeploy sin PUT conserva la comparación estricta del snapshot.
+La huella pre-write permanece intacta, incluida la metadata: los cambios entre revisión y aplicación siguen invalidando el plan. Después del PUT no se calcula una huella global ni se reconstruye un objeto comparable. Se verifica el diff, identidad, artefactos y configuración relevante mediante proyecciones semánticas. En variables fuera del diff se detectan cambios de valor, existencia o clasificación secreta; su metadata puede normalizarse. Sin PUT se utiliza el snapshot actual ya validado, sin un GET/fingerprint posterior artificial.
 
 El historial registra verificación de variables, validación posterior y solicitud/aceptación del redeploy por separado. Un fallo de verificación no expone valores ni solicita redeploy. No se reanuda ni reintenta una ejecución incierta: reconcilia manualmente su resultado en Azure y después prepara un plan nuevo. Con `redeployWhenUnchanged: true`, si el valor ya coincide, el nuevo plan puede solicitar solo redeploy, sin PUT, una vez resuelto el bloqueo de la ejecución anterior.
+
+## Flujo de escritura y observación del intento
+
+```text
+PLAN (objetivo fijado + diff visible + fingerprint)
+  → GET current + guard + TTL/catalog hash + fingerprint fuerte
+  → PUT una sola vez, si hay valores/ausencias que cambiar
+  → GET de verificación acotado (solo lecturas repetibles)
+  → verifyPostUpdateInvariants
+  → PATCH una sola vez al environment de la instancia
+  → esperar que aparezca expectedAttempt
+  → seguir el estado de ese intento hasta un resultado terminal
+```
+
+`verifyPostUpdateInvariants(before, saved, execution)` exige:
+
+- Mismo releaseId y definitionId; release activo.
+- Un único environment con el instanceId, definitionEnvironmentId y nombre revisados.
+- Variables del diff presentes con valor string exacto y `isSecret !== true`, o ausentes si el diff indica eliminación.
+- Artefactos equivalentes por alias, tipo, version.id/name, branch.id y definition.id. No compara links ni metadata añadida por Azure.
+- La rama configurada sigue presente en los artefactos.
+- Identidades y condiciones de stages iguales, sin nuevos triggers no soportados ni intentos concurrentes.
+- Ningún cambio semántico en variables ajenas al diff. El snapshot completo se conserva en la solicitud PUT; la proyección es solo para validar, no para reescribir otros campos.
+
+Las lecturas tras PUT tienen un máximo de **5 consultas**, separación de **750 ms** y presupuesto total de **5 segundos**. Cada GET recibe el tiempo restante y desactiva sus reintentos HTTP internos. Se repiten valores todavía antiguos y errores de transporte/429/5xx; cambios reales de identidad, artefacto, dependencia o actividad bloquean inmediatamente. Un secreto real bloquea inmediatamente. Agotado el presupuesto: `VERIFY_FAILED`, estado `uncertain`, sin PATCH. **Nunca se repite PUT ni PATCH automáticamente.**
+
+Con `redeployWhenUnchanged: true`, si el valor ya coincide, no se envía PUT ni se abre una ventana de read-after-write: se valida el snapshot actual y se solicita el redeploy. Rollback usa exactamente el mismo motor; si se creó una variable, su restauración exige que desaparezca, incluso ante lecturas inicialmente atrasadas.
+
+## Concurrencia y condiciones de stages
+
+Se reconocen `environmentState` (dependencia por nombre), `event/ReleaseStarted` y filtros `artifact`. Un evento desconocido, identidad ambigua o referencia no resoluble no demuestra independencia y bloquea. El grafo se recorre en ambas direcciones: padres, hijos y ramas conectadas mediante un ancestro común se consideran relacionados. Un stage independiente activo puede coexistir con cambios de variables de alcance environment; si se cambian variables de alcance release se bloquea cualquier stage activo.
+
+`downstreamPolicy: allow` permite dependencias conocidas y presenta la advertencia correspondiente; **no garantiza que Azure no ejecute stages posteriores**. El seguimiento cubre exclusivamente el stage seleccionado.
+
+Los tipos `deploymentGroupRedeploy` y `rollbackRedeploy` de `environmentTriggers` están identificados pero siguen bloqueados: su payload no ofrece aquí una prueba de aislamiento. Triggers desconocidos también bloquean. El diagnóstico muestra stage/ID y el tipo conocido o `unknown`, nunca el contenido del trigger. No se eliminan ni deshabilitan condiciones, aprobaciones o gates.
+
+## PATCH y tracking del intento exacto
+
+El gateway utiliza el [endpoint oficial Update Release Environment](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/update-release-environment?view=azure-devops-rest-7.1):
+
+```text
+PATCH https://vsrm.dev.azure.com/{organization}/{project}/_apis/release/releases/{releaseId}/environments/{environmentId}?api-version=7.1
+```
+
+`environmentId` es el **ID de la instancia del stage dentro del release**, no `definitionEnvironmentId`. El body es `{ "status": "inProgress", "comment": "MCP operation <executionId>" }`. La documentación especifica HTTP 200; el cliente admite cualquier 2xx como aceptación, sin depender del body. Aceptación no significa ejecución terminada. Un fallo al recibir la respuesta implica `WRITE_UNCERTAIN` y no se reenvía.
+
+El plan fija `expectedAttempt = max(deploySteps.attempt) + 1`. Tras aceptar PATCH, pueden llegar varias lecturas que solo contienen el intento anterior exitoso: se continúa esperando. Solo el intento esperado puede finalizar la operación. Su `status` tiene prioridad; `succeeded` finaliza con éxito, `failed/partiallySucceeded/canceled/rejected` con fallo; queued/inProgress/estados ausentes o desconocidos continúan en observación. `operationStatus` de rechazo/cancelación/fallo también impide éxito. Nunca se hereda `environment.status = succeeded` como resultado del intento nuevo.
+
+Al detectarlo se guarda su número y, cuando existe, su deploymentId/ID. Un intento posterior, duplicado o cambio de identidad observado lleva a `uncertain`. También se comprueban identidad de release/stage, artefactos y valores revisados durante el tracking. Si no aparece el intento antes del límite: `DEPLOYMENT_NOT_OBSERVED`. Si apareció pero no terminó: `TRACKING_TIMEOUT`. Ambos requieren reconciliación, no nuevas escrituras automáticas. Véanse los [campos oficiales de DeploymentAttempt](https://learn.microsoft.com/en-us/rest/api/azure/devops/release/releases/get-release-environment?view=azure-devops-rest-7.1).
+
+Con `approvals: external` no se envían decisiones. Un error de lectura de aprobaciones se registra como pérdida de visibilidad y el tracking del intento continúa; no convierte por sí mismo el despliegue en fallo. No requiere habilitar escrituras de aprobación ni `vso.release_manage`. Con modo `explicit`, cada decisión necesita las capacidades habilitadas, comentario y revalidación del approvalId/intento. La intención de escritura se persiste antes de enviar la decisión.
+
+## Historial, recuperación y arranque
+
+Los eventos distinguen intención de PUT, aceptación de PUT, variables verificadas, invariantes verificadas, intención de PATCH, aceptación y detección del intento. `lastMutation` identifica variables/deployment/approval; el panel muestra esa fase, el intento observado y problemas de visibilidad de aprobaciones. El registro se escribe antes de cada mutación. Si el proceso se interrumpe en esa fase, el reinicio lo marca `interrupted`; no reproduce solicitudes.
+
+`uncertain`, `interrupted` y `trackingTimedOut` bloquean nuevas mutaciones del mismo release. Antes de preparar rollback de uno de esos estados, hay que reconciliar. **«He reconciliado el estado en Azure» es una declaración humana**, no una prueba automática de que Azure terminó: conserva el historial, marca la ejecución anterior como cerrada (`failed`) y libera el bloqueo local. No envía PUT/PATCH, no cancela despliegues y no restaura variables. Revisa Azure antes de pulsarlo.
+
+El cierre del servidor de revisión rechaza nuevas solicitudes y espera todas las solicitudes ya admitidas, incluidas aprobaciones y recuperación, antes de liberar el store. Un cierre forzado del sistema sigue requiriendo recuperación manual.
+
+Los fallos de arranque emiten únicamente un código permitido, por ejemplo:
+
+```json
+{ "event": "startup_failed", "code": "STORE_LOCKED" }
+```
+
+También se distinguen `INVALID_CATALOG`, `INVALID_CONFIGURATION`, `REVIEW_SERVER_FAILED` y `STATE_UNAVAILABLE`; cualquier otro error se reduce a `STARTUP_FAILED`. No se serializa el error original, headers, PAT, URLs o cuerpos. El lock residual no se elimina automáticamente: confirma que el coordinador anterior dejó de ejecutarse y sigue la recuperación del store. No borres la clave ni los registros cifrados.
+
+## Límites conocidos de esta implementación
+
+Las pruebas HTTP simuladas validan contratos y secuencias, pero no sustituyen una prueba supervisada contra Azure real. PUT+PATCH no son una transacción; tampoco existe aquí CAS/ETag para cerrar las ventanas entre GET/PUT/PATCH. Un coordinador local no excluye operadores en otros equipos. La correlación por número de intento no prueba por sí sola quién originó una solicitud externa simultánea.
+
+La proyección posterior ignora metadata y campos de tareas no modelados: no demuestra ausencia de ediciones concurrentes en scripts/task inputs. El grafo de stages tampoco describe infraestructura compartida, service hooks ni efectos fuera del release. Los valores secretos ocultos no permiten verificar si terceros los cambiaron; se conserva su representación recibida sin intentar revelarlos. Debe verificarse su preservación en la API real antes de utilizar releases con secretos. Una lectura atrasada que exceda 5 segundos produce un bloqueo conservador; no se reintenta la escritura para resolverlo.

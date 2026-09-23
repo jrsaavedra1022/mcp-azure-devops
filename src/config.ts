@@ -1,3 +1,4 @@
+import { AppError } from "./errors.js";
 import { z } from "zod";
 export const organizationSchema = z
   .string()
@@ -29,7 +30,8 @@ const schema = z
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = schema.safeParse(env);
   if (!parsed.success)
-    throw new Error(
+    throw new AppError(
+      "INVALID_CONFIGURATION",
       "Invalid configuration. Check credential exclusivity and environment settings.",
     );
   const v = parsed.data;
@@ -39,7 +41,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (
     allowedOrganizations.some((s) => !organizationSchema.safeParse(s).success)
   )
-    throw new Error("Invalid organization allowlist.");
+    throw new AppError(
+      "INVALID_CONFIGURATION",
+      "Invalid organization allowlist.",
+    );
   return {
     organization: v.AZDO_ORGANIZATION,
     project: v.AZDO_PROJECT,

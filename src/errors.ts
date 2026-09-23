@@ -15,3 +15,18 @@ export function safeError(error: unknown) {
         message: "Request failed. Check configuration and connectivity.",
       };
 }
+
+const startupCodes = [
+  "STORE_LOCKED",
+  "INVALID_CATALOG",
+  "INVALID_CONFIGURATION",
+  "REVIEW_SERVER_FAILED",
+  "STATE_UNAVAILABLE",
+] as const;
+export type StartupCode = (typeof startupCodes)[number] | "STARTUP_FAILED";
+export function startupCode(error: unknown): StartupCode {
+  return error instanceof AppError &&
+    startupCodes.some((code) => code === error.code)
+    ? (error.code as StartupCode)
+    : "STARTUP_FAILED";
+}

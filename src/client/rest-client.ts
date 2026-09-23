@@ -56,6 +56,7 @@ export class RestClient {
     host: Host,
     segments: string[],
     query: Record<string, string | number | undefined> = {},
+    options: { timeoutMs?: number; maxRetries?: number } = {},
   ) {
     if (segments.some((s) => s === "." || s === ".."))
       throw new AppError("INVALID_INPUT", "Invalid path segment.");
@@ -77,7 +78,15 @@ export class RestClient {
             Authorization: this.config.authorization,
             Accept: "application/json",
           },
-          signal: AbortSignal.timeout(this.config.timeoutMs),
+          signal: AbortSignal.timeout(
+            Math.max(
+              1,
+              Math.min(
+                this.config.timeoutMs,
+                options.timeoutMs ?? this.config.timeoutMs,
+              ),
+            ),
+          ),
         });
         if (response.ok) data = await response.json();
         else await response.body?.cancel();
@@ -95,7 +104,7 @@ export class RestClient {
         };
       if (
         [429, 502, 503, 504].includes(response.status) &&
-        attempt < this.config.maxRetries
+        attempt < (options.maxRetries ?? this.config.maxRetries)
       ) {
         const header = response.headers.get("retry-after");
         const delay =

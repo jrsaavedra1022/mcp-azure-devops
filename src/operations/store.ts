@@ -32,7 +32,12 @@ export class EncryptedStore<
     try {
       await mkdir(join(this.directory, "coordinator.lock"));
       this.locked = true;
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+        throw new AppError(
+          "STATE_UNAVAILABLE",
+          "State coordinator cannot be opened.",
+        );
       throw new AppError(
         "STORE_LOCKED",
         "Another coordinator owns this state directory, or recovery is required. See operations guide.",
