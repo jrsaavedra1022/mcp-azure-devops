@@ -24,3 +24,20 @@ export function normalizeVariables(
     ]),
   );
 }
+
+/** Verify only the state controlled by an operation; never coerce values. */
+export function matchesExpectedVariable(
+  actual: Variable | null | undefined,
+  expected: Variable | null,
+): boolean {
+  if (expected === null) return actual === null || actual === undefined;
+  return (
+    actual !== null &&
+    actual !== undefined &&
+    expected.isSecret !== true &&
+    typeof expected.value === "string" &&
+    actual.isSecret !== true &&
+    typeof actual.value === "string" &&
+    actual.value === expected.value
+  );
+}

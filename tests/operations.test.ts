@@ -543,3 +543,187 @@ test("review API and event logs include visible flagless diff but never unrelate
     await review.close();
   }
 });
+
+for (const scope of ["release", "environment"] as const) {
+  for (const normalization of ["omit", "add"] as const) {
+    test(`post-PUT ${normalization} allowOverride at ${scope} verifies value and redeploys`, async () => {
+      const { c, engine, gateway } = await setup();
+      const op = c.catalog.operations["integration-mode"]!;
+      op.variables = [{ ...op.variables[0]!, scope }];
+      c.hash = digest(c.catalog);
+      const vars =
+        scope === "release"
+          ? gateway.release.variables
+          : gateway.release.environments[0]!.variables;
+      vars["integration-enabled"] = {
+        value: "false",
+        ...(normalization === "omit"
+          ? { allowOverride: false, serverMetadata: "original" }
+          : {}),
+      };
+      const update = gateway.update.bind(gateway);
+      gateway.update = async (target, release) => {
+        const requested =
+          scope === "release"
+            ? release.variables
+            : release.environments[0]!.variables;
+        if (normalization === "omit")
+          assert.equal(requested["integration-enabled"]!.allowOverride, false);
+        await update(target, release);
+        const saved =
+          scope === "release"
+            ? gateway.release.variables
+            : gateway.release.environments[0]!.variables;
+        if (normalization === "omit") {
+          delete saved["integration-enabled"]!.allowOverride;
+          delete saved["integration-enabled"]!.serverMetadata;
+        } else {
+          saved["integration-enabled"]!.allowOverride = false;
+          saved["integration-enabled"]!.serverMetadata = "normalized";
+        }
+      };
+      const plan = await engine.plan("integration-mode", "simulated");
+      const result = await engine.applyFromReview(plan.id);
+      assert.equal(result.state, "tracking");
+      assert.equal(gateway.deploys, 1);
+      assert.equal(result.error, undefined);
+      assert.deepEqual(
+        result.events.slice(-4).map((e) => e.message),
+        [
+          "Variables saved and verified.",
+          "Post-update validation passed.",
+          "Requesting environment redeploy.",
+          "Deployment request accepted; waiting for this deployment attempt.",
+        ],
+      );
+      assert.equal((await engine.refresh(plan.id)).state, "succeeded");
+      const rollback = await engine.planRollback(plan.id);
+      assert.equal(
+        (await engine.applyFromReview(rollback.id)).state,
+        "tracking",
+      );
+      assert.equal((await engine.refresh(rollback.id)).state, "succeeded");
+      assert.equal(gateway.deploys, 2);
+    });
+  }
+}
+for (const [label, actual] of [
+  ["different value", { value: "SECRET_SENTINEL" }],
+  ["secret value", { value: "true", isSecret: true }],
+  ["hidden value", { value: null }],
+  ["undefined value", {}],
+  ["missing variable", null],
+] as const) {
+  test(`post-PUT ${label} blocks redeploy without leaking values`, async () => {
+    const { engine, gateway } = await setup();
+    const update = gateway.update.bind(gateway);
+    gateway.update = async (t, r) => {
+      await update(t, r);
+      if (actual === null)
+        delete gateway.release.variables["integration-enabled"];
+      else gateway.release.variables["integration-enabled"] = { ...actual };
+    };
+    const p = await engine.plan("integration-mode", "simulated");
+    const result = await engine.applyFromReview(p.id);
+    assert.equal(result.state, "uncertain");
+    assert.equal(result.error!.code, "VERIFY_FAILED");
+    assert.equal(gateway.deploys, 0);
+    assert.ok(
+      result.events.some(
+        (e) =>
+          e.message ===
+          "Variable update could not be verified; redeploy was not requested.",
+      ),
+    );
+    assert.ok(!JSON.stringify(result).includes("SECRET_SENTINEL"));
+    await assert.rejects(engine.applyFromReview(p.id));
+    assert.equal(gateway.writes, 1);
+  });
+}
+test("creation accepts normalized metadata and restoration requires actual absence", async () => {
+  const { engine, gateway } = await setup();
+  const update = gateway.update.bind(gateway);
+  let preventDeletion = false;
+  gateway.update = async (t, r) => {
+    await update(t, r);
+    const vars = gateway.release.environments[0]!.variables;
+    if (vars["integration-mode"])
+      vars["integration-mode"]!.allowOverride = false;
+    else if (preventDeletion)
+      vars["integration-mode"] = { value: "simulation" };
+  };
+  const p = await engine.plan("integration-mode", "simulated");
+  await engine.applyFromReview(p.id);
+  await engine.refresh(p.id);
+  assert.equal(gateway.deploys, 1);
+  const restore = await engine.planRollback(p.id);
+  preventDeletion = true;
+  const result = await engine.applyFromReview(restore.id);
+  assert.equal(result.error!.code, "VERIFY_FAILED");
+  assert.equal(gateway.deploys, 1);
+});
+test("metadata changes before write or outside the diff still conflict", async () => {
+  for (const phase of ["before", "after"]) {
+    const { engine, gateway } = await setup();
+    gateway.release.variables.unrelated = {
+      value: "keep",
+      allowOverride: false,
+    };
+    const p = await engine.plan("integration-mode", "simulated");
+    if (phase === "before")
+      gateway.release.variables["integration-enabled"]!.allowOverride = true;
+    else {
+      const update = gateway.update.bind(gateway);
+      gateway.update = async (t, r) => {
+        await update(t, r);
+        delete gateway.release.variables.unrelated!.allowOverride;
+      };
+    }
+    const result = await engine.applyFromReview(p.id);
+    assert.equal(result.state, phase === "before" ? "conflict" : "uncertain");
+    assert.equal(gateway.deploys, 0);
+  }
+});
+test("tracking ignores metadata but rejects actual value/secrecy changes", async () => {
+  for (const kind of ["metadata", "value", "secret"]) {
+    const { engine, gateway } = await setup();
+    const p = await engine.plan("integration-mode", "simulated");
+    await engine.applyFromReview(p.id);
+    const v = gateway.release.variables["integration-enabled"]!;
+    if (kind === "metadata") v.allowOverride = true;
+    if (kind === "value") v.value = "false";
+    if (kind === "secret") v.isSecret = true;
+    assert.equal(
+      (await engine.refresh(p.id)).state,
+      kind === "metadata" ? "succeeded" : "uncertain",
+    );
+  }
+});
+test("semantic matching is strict about value types, secrets and existence", async () => {
+  const { matchesExpectedVariable: matches } =
+    await import("../src/operations/variable-state.js");
+  assert.equal(matches(undefined, null), true);
+  assert.equal(matches(null, null), true);
+  assert.equal(matches({ value: "false" }, null), false);
+  assert.equal(
+    matches(
+      { value: "true", allowOverride: true },
+      { value: "true", allowOverride: false },
+    ),
+    true,
+  );
+  assert.equal(
+    matches({ value: "true", isSecret: true }, { value: "true" }),
+    false,
+  );
+  assert.equal(matches({ value: null }, { value: "true" }), false);
+  assert.equal(matches({}, { value: "true" }), false);
+  assert.equal(matches({ value: "TRUE" }, { value: "true" }), false);
+  // Runtime defense even when a malformed adapter bypasses the typed Azure schema.
+  assert.equal(
+    matches({ value: true } as unknown as Parameters<typeof matches>[0], {
+      value: "true",
+    }),
+    false,
+  );
+});

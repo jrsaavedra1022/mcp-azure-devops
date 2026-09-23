@@ -240,3 +240,13 @@ Referencias oficiales: [listado de releases](https://learn.microsoft.com/en-us/r
 Azure puede devolver una variable normal como `{ "value": "false" }`. El motor permite planificar, aplicar y restaurar esa variable. Conserva la representación original del diff y no modifica otras variables. Para comparar snapshots y verificar escrituras, considera equivalentes el flag omitido y `false` únicamente si el valor es string; `true`, valores ocultos y cambios reales siguen provocando bloqueo o conflicto. Esta normalización solo afecta comparaciones, no los cuerpos de las solicitudes ni la persistencia de valores anteriores.
 
 La política confía en la metadata y el valor visible devueltos por Azure; un placeholder string sin `isSecret: true` no puede distinguirse de un valor literal. Un placeholder marcado como secreto siempre se bloquea. Las tools públicas de lectura mantienen su filtrado previo; este cambio solo habilita variables operacionales visibles. Tras actualizar el motor, prepara un plan nuevo: un plan pendiente generado con el fingerprint anterior puede quedar desactualizado.
+
+### Verificación semántica después de actualizar variables
+
+Después del PUT, `matchesExpectedVariable` comprueba existencia, valor string exacto y ausencia de `isSecret: true`. No convierte tipos ni compara `allowOverride` u otra metadata de la variable afectada: Azure puede normalizar esos campos. Los campos originales se conservan en el payload; no se eliminan para hacer coincidir la respuesta. Si la restauración elimina una variable creada, debe estar ausente después del PUT.
+
+La misma comparación se usa al seguir el despliegue, verificar variables antes de aprobar y preparar/verificar una restauración. Un cambio real de valor o a secreto sigue bloqueando la acción o marcando la ejecución como incierta.
+
+La huella pre-write permanece intacta, incluida la metadata: los cambios entre revisión y aplicación siguen invalidando el plan. Solo después de nuestro PUT y de verificar semánticamente las variables del diff se excluye su metadata de la comparación del snapshot posterior. Todas las variables ajenas al diff, identidad, configuración y dependencias siguen verificándose como antes. Un redeploy sin PUT conserva la comparación estricta del snapshot.
+
+El historial registra verificación de variables, validación posterior y solicitud/aceptación del redeploy por separado. Un fallo de verificación no expone valores ni solicita redeploy. No se reanuda ni reintenta una ejecución incierta: reconcilia manualmente su resultado en Azure y después prepara un plan nuevo. Con `redeployWhenUnchanged: true`, si el valor ya coincide, el nuevo plan puede solicitar solo redeploy, sin PUT, una vez resuelto el bloqueo de la ejecución anterior.

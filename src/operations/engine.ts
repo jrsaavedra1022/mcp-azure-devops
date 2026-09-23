@@ -1,4 +1,8 @@
-import { normalizeVariables, variableDigest } from "./variable-state.js";
+import {
+  normalizeVariables,
+  variableDigest,
+  matchesExpectedVariable,
+} from "./variable-state.js";
 import { artifactMetadataSchema } from "../services/release-metadata.js";
 import { matchesBranch } from "./gateway.js";
 import { randomUUID } from "node:crypto";
@@ -455,15 +459,25 @@ export class OperationEngine {
       const saved = await this.gateway.get(r.target, r.releaseId);
       for (const d of r.changes)
         if (
-          variableDigest(
-            this.variables(saved, r.environmentId, d.scope)[d.name] ?? null,
-          ) !== variableDigest(d.after)
+          !matchesExpectedVariable(
+            this.variables(saved, r.environmentId, d.scope)[d.name],
+            d.after,
+          )
         )
           throw new AppError(
             "VERIFY_FAILED",
-            "Saved variable differs from the plan. Redeploy was not requested.",
+            `Saved variable "${d.name}" differs from the requested value. Redeploy was not requested.`,
           );
-      if (this.fingerprint(saved) !== this.fingerprint(current))
+      // Only after our PUT and successful semantic verification may Azure normalize
+      // metadata on variables in the diff. All other fields still match exactly.
+      const comparable = structuredClone(saved);
+      if (valuesChanged) {
+        for (const d of r.changes) {
+          const vars = this.variables(comparable, r.environmentId, d.scope);
+          if (d.after !== null) vars[d.name] = structuredClone(d.after);
+        }
+      }
+      if (this.fingerprint(comparable) !== this.fingerprint(current))
         throw new AppError(
           "VERIFY_FAILED",
           "Other release fields changed while saving. Redeploy was not requested.",
@@ -477,6 +491,7 @@ export class OperationEngine {
       );
       await this.store.put(r);
       this.guard(r.target, saved, r.policy);
+      this.event(r, "Post-update validation passed.");
       r.state = "requestingDeployment";
       r.deploymentRequestedAt = new Date(this.now()).toISOString();
       r.deadline = new Date(
@@ -500,6 +515,11 @@ export class OperationEngine {
     } catch (e) {
       r.state = mutation ? "uncertain" : "conflict";
       r.error = safeError(e);
+      if (e instanceof AppError && e.code === "VERIFY_FAILED")
+        this.event(
+          r,
+          "Variable update could not be verified; redeploy was not requested.",
+        );
       this.event(
         r,
         mutation
@@ -557,10 +577,10 @@ export class OperationEngine {
           next === "succeeded" &&
           r.changes.some(
             (d) =>
-              variableDigest(
-                this.variables(release, r.environmentId, d.scope)[d.name] ??
-                  null,
-              ) !== variableDigest(d.after),
+              !matchesExpectedVariable(
+                this.variables(release, r.environmentId, d.scope)[d.name],
+                d.after,
+              ),
           )
         ) {
           next = "uncertain";
@@ -638,9 +658,10 @@ export class OperationEngine {
         decision === "approved" &&
         r.changes.some(
           (d) =>
-            variableDigest(
-              this.variables(release, r.environmentId, d.scope)[d.name] ?? null,
-            ) !== variableDigest(d.after),
+            !matchesExpectedVariable(
+              this.variables(release, r.environmentId, d.scope)[d.name],
+              d.after,
+            ),
         )
       )
         throw new AppError(
@@ -705,7 +726,7 @@ export class OperationEngine {
         this.variables(release, env.id, d.scope),
         d.name,
       );
-      if (variableDigest(current) !== variableDigest(d.after))
+      if (!matchesExpectedVariable(current, d.after))
         throw new AppError(
           "ROLLBACK_CONFLICT",
           "A changed variable no longer matches the value written by this operation.",
